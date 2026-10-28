@@ -1,0 +1,25 @@
+title = "Karambit gitleaks config"
+
+[extend]
+useDefault = true
+
+# Synthetic test material only. Each entry is limited to one path and, where the
+# file holds other content, to the exact fake value.
+
+[[allowlists]]
+description = "Public synthetic age identity used as a test fixture"
+condition = "AND"
+paths = ['''^crates/core/tests/fixtures/SYNTHETIC-age-identity\.txt$''']
+regexes = ['''AGE-SECRET-KEY-1P078T[0-9A-Z]+''']
+
+[[allowlists]]
+description = "AWS documentation-style fake access key id in a unit test"
+condition = "AND"
+paths = ['''^crates/core/tests/core\.rs$''']
+regexes = ['''AKIAABCDEFGHIJKLMNOP''']
+
+[[allowlists]]
+description = "Fake synthetic access key id and canary in a daemon test"
+condition = "AND"
+paths = ['''^crates/core/src/daemon\.rs$''']
+regexes = ['''AKIASYNTHETICKEY001''', '''long-term-secret-canary''']

@@ -1,0 +1,5 @@
+# Tests that need an agent caller list this marker in their own vault config and rely on
+# the test process carrying it in its initial environment (the only place peer detection
+# reads from). Release configs never list it, so this has no effect on production behaviour.
+[env]
+KARAMBIT_SYNTHETIC_AGENT = "1"

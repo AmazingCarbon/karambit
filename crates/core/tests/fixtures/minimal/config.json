@@ -1,0 +1,28 @@
+{
+  "agent_env_markers": [
+    "PI_CODING_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CODEX_SANDBOX",
+    "CURSOR_AGENT",
+    "AIDER_MODEL",
+    "GEMINI_CLI",
+    "OPENCODE"
+  ],
+  "agent_process_names": [
+    "pi",
+    "claude",
+    "kiro",
+    "kiro-cli",
+    "codex",
+    "cursor-agent",
+    "aider",
+    "gemini",
+    "opencode",
+    "goose",
+    "amp",
+    "crush"
+  ],
+  "clip_seconds": 30,
+  "default_tier": "bio"
+}

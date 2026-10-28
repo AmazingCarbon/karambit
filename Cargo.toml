@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "app/src-tauri"]
+default-members = ["crates/core", "crates/cli"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Proc-macro dylibs need their __rustc metadata section; stripping them breaks the build.
+[profile.release.build-override]
+strip = false

@@ -1,0 +1,41 @@
+{
+  "default_tier": "bio",
+  "backup_recipient": "age1tzf9xl76vrcsgmmhgs7xu7x75zu304kwx30c29wcu24ae42z7cwsmq7lqf",
+  "clip_seconds": 30,
+  "agent_process_names": [
+    "pi",
+    "claude",
+    "kiro",
+    "kiro-cli",
+    "codex",
+    "cursor-agent",
+    "aider",
+    "gemini",
+    "opencode",
+    "goose",
+    "amp",
+    "crush"
+  ],
+  "agent_env_markers": [
+    "PI_CODING_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CODEX_SANDBOX",
+    "CURSOR_AGENT",
+    "AIDER_MODEL",
+    "GEMINI_CLI",
+    "OPENCODE"
+  ],
+  "human_lease_hours": 3.0,
+  "sso_portals": {
+    "synthetic-limited": {
+      "start_url": "https://synthetic-limited.invalid/start",
+      "region": "us-east-1",
+      "limit_minutes": 45
+    },
+    "synthetic-unlimited": {
+      "start_url": "https://synthetic-unlimited.invalid/start",
+      "region": "us-east-1"
+    }
+  }
+}

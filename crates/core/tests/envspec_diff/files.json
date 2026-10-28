@@ -1,0 +1,14 @@
+[
+  "HOST=localhost\nPORT=8080\nURL=http://${HOST}:$PORT/x",
+  "A=one\nB=${A}-two\nC=${B}-three",
+  "D=${MISSING:-fallback}\nE=${MISSING-dash}",
+  "S='literal $HOST'\nHOST=h",
+  "Q=\"quoted ${HOST} ok\"\nHOST=h",
+  "BT=`back ${HOST}`\nHOST=h",
+  "PATHY=/opt/$NAME/bin\nNAME=tool",
+  "N=\"a\\nb\"",
+  "PAD=  spaced value  ",
+  "EMPTY=\nUSE=x${EMPTY}y",
+  "SHELLVAR=from-file\nUSE=${SHELLVAR}",
+  "DEFSET=${HOST:-nope}\nHOST=real"
+]

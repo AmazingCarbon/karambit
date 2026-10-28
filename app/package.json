@@ -1,0 +1,14 @@
+{
+  "name": "karambit-gui",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build --bundles app",
+    "test": "node --test tests/"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.0"
+  }
+}

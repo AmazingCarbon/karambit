@@ -1,0 +1,6 @@
+/target/
+/se-helper/.build/
+/app/node_modules/
+/app/src-tauri/gen/
+/app/src-tauri/binaries/karambit-se-helper-*
+.DS_Store

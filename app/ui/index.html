@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Karambit</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="side">
+    <div class="brand">
+      <svg class="logo" width="46" height="22" viewBox="0 6 23 11" shape-rendering="crispEdges" role="img" aria-label="Karambit"><rect x="12" y="7" width="1" height="1" fill="#6b7686"/><rect x="7" y="8" width="5" height="1" fill="#e6ebf1"/><rect x="12" y="8" width="1" height="1" fill="#6b7686"/><rect x="5" y="9" width="7" height="1" fill="#e6ebf1"/><rect x="12" y="9" width="1" height="1" fill="#6b7686"/><rect x="13" y="9" width="5" height="1" fill="#3cc79a"/><rect x="3" y="10" width="4" height="1" fill="#e6ebf1"/><rect x="7" y="10" width="5" height="1" fill="#9aa6b5"/><rect x="12" y="10" width="1" height="1" fill="#6b7686"/><rect x="13" y="10" width="5" height="1" fill="#3cc79a"/><rect x="18" y="10" width="3" height="1" fill="#e6ebf1"/><rect x="2" y="11" width="3" height="1" fill="#e6ebf1"/><rect x="5" y="11" width="2" height="1" fill="#9aa6b5"/><rect x="12" y="11" width="1" height="1" fill="#6b7686"/><rect x="13" y="11" width="1" height="1" fill="#3cc79a"/><rect x="14" y="11" width="1" height="1" fill="#1e8f6c"/><rect x="15" y="11" width="1" height="1" fill="#3cc79a"/><rect x="16" y="11" width="1" height="1" fill="#1e8f6c"/><rect x="17" y="11" width="1" height="1" fill="#e6ebf1"/><rect x="21" y="11" width="1" height="1" fill="#e6ebf1"/><rect x="1" y="12" width="2" height="1" fill="#e6ebf1"/><rect x="3" y="12" width="2" height="1" fill="#9aa6b5"/><rect x="12" y="12" width="1" height="1" fill="#6b7686"/><rect x="13" y="12" width="1" height="1" fill="#1e8f6c"/><rect x="17" y="12" width="1" height="1" fill="#e6ebf1"/><rect x="21" y="12" width="1" height="1" fill="#e6ebf1"/><rect x="1" y="13" width="1" height="1" fill="#e6ebf1"/><rect x="2" y="13" width="2" height="1" fill="#9aa6b5"/><rect x="17" y="13" width="1" height="1" fill="#e6ebf1"/><rect x="21" y="13" width="1" height="1" fill="#e6ebf1"/><rect x="1" y="14" width="1" height="1" fill="#e6ebf1"/><rect x="2" y="14" width="1" height="1" fill="#9aa6b5"/><rect x="18" y="14" width="3" height="1" fill="#e6ebf1"/><rect x="1" y="15" width="1" height="1" fill="#e6ebf1"/></svg>
+      <span>Karambit</span>
+    </div>
+    <nav class="nav" aria-label="Sections">
+      <button class="tab" data-view="secrets" title="Secrets (⌘1)" aria-keyshortcuts="Meta+1"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.5" cy="8" r="3"/><path d="M8.5 8H14M12 8v2.5M14 8v2"/></svg><span class="tab-label">Secrets</span></button>
+      <button class="tab" data-view="aws" title="AWS (⌘2)" aria-keyshortcuts="Meta+2"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12h8a3 3 0 0 0 .5-6A4.5 4.5 0 0 0 4 5a3.5 3.5 0 0 0 0 7z"/></svg><span class="tab-label">AWS</span></button>
+      <button class="tab" data-view="sources" title="Linked sources, beta (⌘3)" aria-keyshortcuts="Meta+3"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 10 10 6M6 6l2-2a3 3 0 0 1 4 4l-2 2M10 10l-2 2a3 3 0 0 1-4-4l2-2"/></svg><span class="tab-label">Linked sources <span class="tag beta">Beta</span></span></button>
+      <button class="tab" data-view="audit" title="Activity (⌘4)" aria-keyshortcuts="Meta+4"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l2-5 3 10 2-5h3"/></svg><span class="tab-label">Activity</span></button>
+      <button class="tab" data-view="settings" title="Settings (⌘5)" aria-keyshortcuts="Meta+5"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h7M12.5 4.5h1M2.5 11.5h1M6.5 11.5h7"/><circle cx="11" cy="4.5" r="1.5"/><circle cx="5" cy="11.5" r="1.5"/></svg><span class="tab-label">Settings</span></button>
+      <button class="tab" data-view="status" title="Status (⌘6)" aria-keyshortcuts="Meta+6"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8 13.5 4v4c0 3.2-2.4 5.4-5.5 6.2C4.9 13.4 2.5 11.2 2.5 8V4z"/><path d="m5.6 8 1.7 1.7 3.2-3.4"/></svg><span class="tab-label">Status</span><span class="tab-n bad" id="status-badge" title="Agents blocked" hidden>!</span></button>
+    </nav>
+    <div class="side-foot">
+      <span id="health" class="chip" role="status"><span class="dot"></span><span class="chip-text">Checking…</span></span>
+    </div>
+  </aside>
+
+  <main>
+    <!-- Setup -->
+    <section id="view-init" hidden>
+      <div class="init-wrap">
+        <div class="ph"><h1>Set up Karambit</h1><span class="sp"></span><button type="button" class="link" id="init-recover">Moving from another Mac? Restore from paper backup</button></div>
+        <p class="hint init-sub">Three steps. Nothing leaves this Mac.</p>
+        <ol class="stps">
+          <li class="stp done"><span class="nm3" aria-hidden="true">1</span><div><h2>Keys for this Mac</h2><p>Two Secure Enclave keys: one asks for Touch ID, one lets approved agents work without a prompt. Created when you continue.</p></div></li>
+          <li class="stp now" aria-current="step"><span class="nm3" aria-hidden="true">2</span><div class="grow">
+            <h2 id="init-backup-h">Offline backup</h2><p>If this Mac is lost or your fingerprints change, a backup is the only way back in.</p>
+            <div class="choices" role="radiogroup" aria-labelledby="init-backup-h">
+              <label class="choice"><input type="radio" name="init-backup" value="paper" checked><span class="rad2" aria-hidden="true"></span><span><b>Paper backup (recommended)</b><small>A key you write down once and keep offline.</small></span></label>
+              <label class="choice"><input type="radio" name="init-backup" value="age"><span class="rad2" aria-hidden="true"></span><span><b>My own age key</b><small>Paste an age1… public key.</small></span></label>
+            </div>
+            <div id="init-recip-box" hidden>
+              <label class="sr-only" for="init-recip">age public key</label>
+              <input id="init-recip" autocomplete="off" spellcheck="false" placeholder="age1…">
+            </div>
+          </div></li>
+          <li class="stp"><span class="nm3" aria-hidden="true">3</span><div><h2>Your first secret</h2><p>Name it <span class="mono">stripe/live-key</span>: the part before the slash becomes its folder.</p></div></li>
+        </ol>
+        <div class="init-actions"><button type="button" class="link quiet" id="init-skip">Set up without a backup…</button><span class="sp"></span><button type="button" class="btn primary" id="init-btn">Continue: make a paper backup</button></div>
+      </div>
+    </section>
+
+    <!-- Secrets: one list for everything, AWS profiles included -->
+    <section id="view-secrets" hidden>
+      <nav id="breadcrumbs" class="breadcrumbs" aria-label="Folder path"></nav>
+      <div class="page-head head-row"><h1 id="folder-title">Secrets</h1><span id="count" class="muted"></span>
+        <div class="head-actions">
+          <button id="palette-open" class="btn">Find <kbd>⌘K</kbd></button>
+          <button id="add-open" class="btn primary">New secret</button>
+          <details id="more-menu" class="more-menu"><summary class="btn ibtn-more" aria-label="More actions">⋯</summary>
+            <div class="more-popover" role="menu" aria-labelledby="more-title">
+              <div class="menu-head"><span id="more-title">More · Secrets</span><span class="sp"></span><button type="button" class="ibtn menu-close" id="more-close" aria-label="Close menu" title="Close (Esc)"></button></div>
+              <button id="folder-open" class="menu-item" role="menuitem">New folder</button>
+              <button id="source-open-more" class="menu-item" role="menuitem">Link source</button>
+              <hr class="menu-sep" role="separator">
+              <div class="menu-group" id="more-vault-label">Whole vault</div>
+              <div role="group" aria-labelledby="more-vault-label">
+                <button id="leases-end-all" class="menu-item danger-text" role="menuitem" hidden>End all temporary access</button>
+                <button id="block-agents-menu" class="menu-item danger-text" role="menuitem">Block all agents…</button>
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="toolbar filter-row">
+        <div class="search">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+          <label for="filter" class="sr-only">Filter secrets</label>
+          <input id="filter" type="search" placeholder="Filter" autocomplete="off" spellcheck="false">
+        </div>
+        <!-- Exposure: what agents can read without asking, as filters (rendered in renderExposure) -->
+        <div id="exposure" class="exposure" hidden>
+          <div id="exposure-chips" class="exposure-chips" role="group" aria-label="Show only items with this access"></div>
+        </div>
+      </div>
+      <p id="exposure-state" class="exposure-state small" hidden><span id="exposure-showing"></span> · <button type="button" id="exposure-clear" class="exposure-clear">Clear</button></p>
+      <p id="exposure-legend" class="exposure-legend small" hidden></p>
+      <!-- Alerts, most severe first: AWS signed out (agents broken), screen-lock key, backup. One line shows; "+N more" expands. -->
+      <div id="alerts" class="alerts-collapsed">
+        <div id="block-banner" class="banner bad has-icon" role="status" hidden></div>
+        <div id="sso-banner" class="sso-banner" role="region" aria-label="AWS sign-in" hidden></div>
+        <div id="lock-banner" class="banner warn lock-banner" role="status" hidden>
+          <svg class="banner-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 1 0 0-13z"/><path d="M8 7.3v4"/><path d="M8 4.9v.01"/></svg>
+          <span id="lock-banner-text"></span>
+          <button type="button" id="lock-fix" class="btn sm">Fix now</button>
+        </div>
+        <div id="backup-banner" class="banner warn has-icon" hidden></div>
+      </div>
+      <div class="secrets-body"><div class="folder-list">
+        <div id="rows" class="card" aria-label="Folders and secrets"></div>
+        <div id="empty" class="empty card" hidden>
+          <h2 id="empty-text">Your folders will live here</h2>
+          <div id="empty-hint" hidden><p>You decide who can use each secret. Name it <code>stripe/live-key</code> and its folder is made for you.</p>
+          <div class="empty-choices"><button id="empty-add" class="btn primary">Add a secret</button><button id="empty-aws" class="btn">Connect AWS</button></div>
+          <p class="hint">⌘N adds a secret · ⌘K finds anything</p>
+          <p class="hint">Use <code>karambit run -e VAR=folder/name -- cmd</code> or <code>karambit aws profile -- aws …</code>. Output is redacted; programs receiving a value can still read it.</p></div>
+        </div>
+        <p id="hidden-folders" class="hint"></p>
+      </div><aside id="inspector" class="inspector" aria-label="Secret details" hidden></aside></div>
+    </section>
+
+    <section id="view-aws" hidden>
+      <nav class="breadcrumbs aws-top" aria-label="Section"><b>AWS</b><button id="aws-find" class="btn sm">Find <kbd>⌘K</kbd></button></nav>
+      <div class="page-head head-row aws-head"><h1 class="mono">aws/</h1>
+        <div class="head-actions">
+          <details id="aws-portals" class="portals-menu"><summary id="portals-btn" class="btn">Portals</summary><div class="portals-popover"><button class="ibtn" id="portals-close" aria-label="Close portals">×</button><div id="portal-items"></div><button id="sso-add" class="btn">Add portal…</button></div></details>
+          <button id="aws-open" class="btn primary">New profile</button>
+        </div>
+      </div>
+      <p id="aws-count" class="hint aws-count"></p>
+      <div class="toolbar"><div class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><label for="aws-filter" class="sr-only">Filter aws/</label><input id="aws-filter" type="search" placeholder="Filter aws/" autocomplete="off" spellcheck="false"></div></div>
+      <div id="aws-exposure" class="exposure-chips" aria-label="Filter AWS by access"></div>
+      <div class="secrets-body"><div class="folder-list"><div id="aws-warnings"></div><div id="aws-groups"></div><p id="aws-empty" class="empty card" hidden>No AWS profiles match.</p></div></div>
+    </section>
+
+    <section id="view-sources" hidden>
+      <nav id="sources-breadcrumbs" class="breadcrumbs" aria-label="Linked source path"></nav>
+      <div class="page-head"><h1 id="sources-title" tabindex="-1">Linked sources</h1><span class="tag beta" title="Linked sources are in beta: behaviour and config may change">Beta</span></div>
+      <p class="banner info beta-note" role="note">Beta. Linked sources may change between versions, and detected agents are still refused for source refs. Keep a local copy of anything critical.</p>
+      <div class="toolbar"><div class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><label for="sources-filter" class="sr-only">Filter linked sources</label><input id="sources-filter" type="search" placeholder="Filter" autocomplete="off" spellcheck="false"></div><div class="add-group"><button id="source-open" class="btn primary">Link source</button></div></div>
+      <div class="folder-list"><div id="source-rows" class="card"></div><div id="sources-empty" class="empty card" hidden></div></div>
+    </section>
+
+    <!-- Audit -->
+    <section id="view-audit" hidden>
+      <div class="page-head"><h1>Activity</h1></div>
+      <div class="toolbar">
+        <span id="chain" class="chip" role="status"><span class="dot"></span><span class="chip-text"></span></span>
+        <fieldset class="seg" id="audit-only">
+          <legend class="sr-only">Show events</legend>
+          <label><input type="radio" name="audit-only" value="all" checked><span>All</span></label>
+          <label><input type="radio" name="audit-only" value="denied"><span>Denied only</span></label>
+        </fieldset>
+        <div class="search">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+          <label for="audit-secret" class="sr-only">Filter by secret</label>
+          <input id="audit-secret" type="search" placeholder="Filter by secret" list="audit-secret-names" autocomplete="off" spellcheck="false" autocapitalize="off">
+          <datalist id="audit-secret-names"></datalist>
+        </div>
+      </div>
+      <div class="audit-meta muted small">
+        <span id="audit-count" aria-live="polite"></span>
+        <span id="audit-scope" hidden></span>
+        <span class="audit-hint">Every use and change, newest first · click a row for details · values are never logged</span>
+      </div>
+      <div class="card activity-card">
+        <table class="list audit">
+          <thead><tr><th scope="col">What</th><th scope="col">Who</th><th scope="col" class="r">When</th></tr></thead>
+          <tbody id="audit-rows"></tbody>
+        </table>
+        <div id="audit-empty" class="empty" hidden><p id="audit-empty-text">No events yet.</p></div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="view-status" hidden>
+      <div class="page-scroll"><div class="page-wrap">
+        <div class="ph"><h1>Status</h1><span class="hint" id="status-when"></span><span class="sp"></span><button type="button" class="btn sm" id="status-refresh">Refresh</button></div>
+        <div class="sum" id="status-attention" role="list" aria-label="Needs attention"></div>
+        <div class="grid2">
+          <div><div class="sh2"><h2 class="lbl">This Mac</h2></div><div class="kvc" id="status-mac"></div></div>
+          <div><div class="sh2"><h2 class="lbl">Agents</h2><span class="sp"></span><button type="button" class="btn sm danger-ghost" id="status-block">Block all agents…</button></div><div class="kvc" id="status-agents"></div></div>
+        </div>
+        <div class="sh2"><h2 class="lbl">Temporary access</h2><span class="hint" id="status-leases-count"></span></div>
+        <div class="lrows" id="status-leases"></div>
+
+        <div class="sh2 sec-gap"><h2 class="lbl">What can agents reach?</h2><span class="hint" id="doctor-when"></span><span class="sp"></span><button type="button" class="btn sm" id="doctor-run">Run check</button></div>
+        <p class="hint sh-intro" id="doctor-intro">Tries what any program running as you could do, with a fake test secret: no real secrets are read and nothing is changed. Takes a few seconds.</p>
+        <div id="doctor-result" aria-live="polite"></div>
+
+        <div class="sh2 sec-gap"><h2 class="lbl">Policy rules</h2><span class="hint">Read-only · from <span class="mono">config.json</span></span></div>
+        <p class="hint sh-intro">Rules add limits on top of each secret’s access level. Deny and Ask tighten; Allow only permits what the secret’s level already allows.</p>
+        <div class="lrows" id="policy-rules"></div>
+        <div class="sim">
+          <span class="hint nowrap" id="policy-lead">What would happen if</span>
+          <label class="sr-only" for="policy-who">Who</label><select id="policy-who" aria-describedby="policy-lead"><option value="">you</option></select>
+          <label class="sr-only" for="policy-action">Action</label><select id="policy-action"><option value="run">runs with</option><option value="get">reveals</option><option value="copy">copies</option><option value="view">views</option><option value="export">exports</option><option value="call">calls tool</option><option value="egress">connects to</option></select>
+          <label class="sr-only" for="policy-subject">Secret, tool or host</label><input id="policy-subject" placeholder="stripe/live-key" autocomplete="off" spellcheck="false">
+          <button type="button" class="btn sm" id="policy-explain">Check</button>
+        </div>
+        <div class="res" id="policy-result" role="status" hidden></div>
+      </div></div>
+    </section>
+
+    <section id="view-settings" hidden>
+      <div class="ph"><h1>Settings</h1></div>
+      <div class="settings-layout">
+      <nav class="snav2" id="settings-nav" aria-label="Settings sections">
+        <a href="#settings-defaults" data-sec="settings-defaults">Defaults</a>
+        <a href="#settings-backup" data-sec="settings-backup">Backup<span class="n" id="snav-backup-n" hidden></span></a>
+        <a href="#settings-agents" data-sec="settings-agents">Agents<span class="n" id="snav-agents-n" hidden></span></a>
+        <a href="#settings-projects" data-sec="settings-projects">Project files<span class="n" id="snav-projects-n" hidden></span></a>
+        <a href="#settings-detection" data-sec="settings-detection">Agent detection</a>
+        <a href="#settings-about" data-sec="settings-about">About</a>
+      </nav>
+      <div class="settings-body"><form id="settings-form">
+        <h2 class="sec" id="settings-defaults">Defaults</h2>
+        <div class="card">
+          <label class="row">
+            <span class="row-text"><b>Touch ID for new secrets</b><small>Default for secrets you add. You can change it per secret.</small></span>
+            <span class="sw"><input type="checkbox" id="cfg-default-tier"><span class="track" aria-hidden="true"></span></span>
+          </label>
+          <div class="row info">
+            <span class="row-text"><b>Replacing a value</b><small>Adding a new secret never asks. Overwriting an existing one always asks for Touch ID.</small></span>
+          </div>
+          <div class="row">
+            <span class="row-text"><label for="cfg-clip"><b>Clear clipboard after</b></label><small>Seconds before a copied value is wiped.</small></span>
+            <input id="cfg-clip" class="num" type="number" min="5" max="600">
+          </div>
+          <div class="row">
+            <span class="row-text"><label for="cfg-human-lease"><b>Reuse your Touch ID for</b></label><small>Hours an “Only me · Touch ID” secret stays unlocked for you after one Touch ID (ends early when the screen locks). 0 asks every time. Making it longer asks for Touch ID.</small></span>
+            <input id="cfg-human-lease" class="num" type="number" min="0" max="168" step="0.5">
+          </div>
+        </div>
+
+        <h2 class="sec" id="settings-backup">Backup</h2>
+        <div class="card setrows">
+          <div class="setrow">
+            <span class="gly" id="backup-gly" aria-hidden="true"></span>
+            <span class="tx2"><b>Paper backup</b><small id="backup-state"></small></span>
+            <button type="button" class="btn sm" id="backup-verify-open">Check paper key</button><button type="button" class="btn sm" id="backup-rotate-open">New paper key…</button>
+          </div>
+          <div class="setrow" id="backup-missing-row" hidden>
+            <span class="tx2"><b id="backup-missing-title"></b><small id="backup-missing-sub"></small></span>
+            <button type="button" class="btn sm primary" id="backup-missing-btn">Back it up</button>
+          </div>
+          <div class="setrow">
+            <span class="tx2"><b>Restore from paper backup</b><small>Only if Touch ID no longer opens your secrets: fingerprints changed, keys lost, or a vault copied from another Mac. Replaces this Mac’s keys.</small></span>
+            <button type="button" class="btn sm" id="backup-recover-open">Restore…</button>
+          </div>
+          <details class="disc" id="backup-advanced"><summary>Use your own age key instead <span class="hint">(advanced)</span></summary>
+            <div class="row stack">
+              <span class="row-text"><label for="cfg-backup"><b>Backup recipient</b></label><small>age public key (age1…). Set by your paper backup; change it only if you keep your own age key offline.</small></span>
+              <input id="cfg-backup" autocomplete="off" spellcheck="false" placeholder="age1…">
+            </div>
+          </details>
+        </div>
+
+        <h2 class="sec" id="settings-agents">Agents</h2>
+        <div class="card setrows">
+          <div class="setrow">
+            <span class="tx2"><b>Block all agents</b><small id="block-state">Refuses every agent request until you unblock. Ends temporary access. Running programs aren’t stopped. Touch ID.</small></span>
+            <button type="button" class="btn sm danger-ghost" id="block-agents-settings">Block all agents…</button>
+          </div>
+        </div>
+
+        <div class="sh2 sec-gap" id="settings-projects"><h2 class="sec">Project files</h2><span class="sp"></span><button type="button" class="btn sm primary" id="profile-add" aria-expanded="false" aria-controls="profile-add-box">Trust a .karambit.env…</button></div>
+        <p class="hint sh-intro">Agents can use a project’s <span class="mono">.karambit.env</span> only after you trust its exact contents (Touch ID). It holds names like <span class="mono">stripe/live-key</span>, never values.</p>
+        <div class="profile-add" id="profile-add-box" hidden>
+          <label class="sr-only" for="profile-path">Project folder or .karambit.env path</label>
+          <div class="inline-form"><input id="profile-path" autocomplete="off" spellcheck="false" placeholder="~/code/app or ~/code/app/.karambit.env"><button type="button" class="btn sm" id="profile-check">Review</button></div>
+        </div>
+        <div class="lrows" id="profile-list"></div>
+
+        <h2 class="sec" id="settings-detection">Agent detection</h2>
+        <input id="cfg-detection" type="hidden">
+        <div class="card">
+          <div class="row stack">
+            <span class="row-text"><label for="cfg-procs"><b>Process names</b></label><small>A caller chain containing one of these counts as an agent. Enter, comma or Tab adds a name.</small></span>
+            <div class="token-field" id="cfg-procs-box"><input id="cfg-procs" autocomplete="off" spellcheck="false" aria-describedby="token-help"></div>
+          </div>
+          <div class="row stack">
+            <span class="row-text"><label for="cfg-env"><b>Environment markers</b></label><small>Variables that mark an agent session. Paste a list to add several.</small></span>
+            <div class="token-field" id="cfg-env-box"><input id="cfg-env" autocomplete="off" spellcheck="false" aria-describedby="token-help"></div>
+          </div>
+          <div class="row stack">
+            <small id="token-help">Backspace in an empty field removes the last chip. Removing detection asks for Touch ID; adding does not.</small>
+            <button type="button" class="btn" id="detect-agents">Detect installed agents</button>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <div class="form-status">
+            <span id="settings-note" class="muted small">Relaxing a setting asks for Touch ID.</span>
+            <p id="settings-result" class="small" role="status"></p>
+          </div>
+          <button type="submit" class="btn primary" aria-describedby="settings-note settings-result">Save changes</button>
+        </div>
+      </form>
+
+      <h2 class="sec" id="settings-about">About this Mac</h2>
+      <div class="card">
+        <dl id="about" class="about"></dl>
+      </div></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Add dialog -->
+  <dialog id="add-dialog" aria-labelledby="add-title">
+    <form id="add-form" method="dialog">
+      <button type="button" id="add-back" class="btn sm step-back" hidden>← Back</button>
+      <h2 id="add-title">New secret</h2><p class="hint">Name it folder/name. A new folder appears when you save.</p>
+      <label class="lbl" for="add-name">Name</label>
+      <input id="add-name" required autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*(/[A-Za-z0-9_\-][A-Za-z0-9._\-]*)*" placeholder="folder/name">
+      <label class="lbl" for="add-value">Value</label>
+      <input id="add-value" type="password" required autocomplete="off">
+
+      <fieldset class="access-pick">
+        <legend class="lbl">Access</legend>
+        <div id="add-access" class="opts"></div>
+      </fieldset>
+      <div class="opts">
+        <label class="row">
+          <span class="row-text"><b>Overwrite if it exists</b></span>
+          <span class="sw"><input type="checkbox" id="add-force"><span class="track" aria-hidden="true"></span></span>
+        </label>
+      </div>
+
+      <p id="add-error" class="form-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="add-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="add-submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Secret details: lease + activity -->
+  <dialog id="detail-dialog" class="wide" aria-labelledby="detail-title">
+    <form method="dialog">
+      <div class="detail-head">
+        <div>
+          <h2 id="detail-title" class="mono-title"></h2>
+          <p id="detail-sub" class="muted small"></p>
+          <p id="detail-access" class="small detail-access" hidden></p>
+        </div>
+      </div>
+
+      <div id="aws-detail" hidden>
+        <div class="aws-status-strip"><p id="aws-detail-state" class="small" hidden></p><button type="button" class="btn sm primary" id="aws-detail-signin" hidden>Sign in</button></div>
+        <div class="aws-section-heading"><h3 class="sec">AWS profile</h3><button type="button" class="link" id="aws-detail-edit">Edit</button></div>
+        <b id="aws-detail-kind" hidden></b><small id="aws-detail-sub"></small><button type="button" class="btn sm" id="aws-detail-reveal" hidden>Show details</button>
+        <div class="aws-box">
+          <dl id="aws-detail-kv" class="aws-kv" hidden></dl>
+          <div class="aws-default-row">
+            <span id="aws-default-label">Default for <span class="mono">karambit whoami</span></span>
+            <button type="button" class="tgl" id="aws-detail-default" role="switch" aria-checked="false" aria-labelledby="aws-default-label"></button>
+          </div>
+        </div>
+        <div class="aws-section-heading"><h3 class="sec">Test sign-in</h3><button type="button" class="btn sm" id="aws-detail-test">Test sign-in</button></div>
+        <div id="aws-detail-test-result" class="tsr" role="status" hidden></div>
+        <h3 class="sec">Agents run it with</h3>
+        <div class="cmd-copy"><code id="aws-detail-cmd"></code><button type="button" class="ibtn" id="aws-detail-copy" aria-label="Copy command" title="Copy command"></button></div>
+      </div>
+
+      <div id="lease-active" class="banner warn" hidden>
+        <b id="lease-active-text"></b><p id="lease-active-sub" class="small"></p>
+        <button type="button" class="btn sm" id="lease-revoke">End temporary access</button>
+      </div>
+      <div id="lease-form">
+        <div class="lease-controls lease-sentence">
+          <span>Let</span><label class="sr-only" for="lease-to">Agent or session</label><select id="lease-to"></select>
+          <span>use</span><strong id="lease-target-name" class="mono"></strong>
+          <span>for</span><label class="sr-only" for="lease-hours">Duration</label><select id="lease-hours">
+            <option value="1">1 hour</option><option value="2" selected>2 hours</option><option value="3">3 hours</option><option value="8">8 hours</option><option value="24">24 hours</option><option value="72">3 days</option>
+          </select>
+          <label for="lease-cwd">only in</label><input id="lease-cwd" autocomplete="off" spellcheck="false" placeholder="Any folder (or absolute path)">
+        </div>
+        <details class="lease-limits">
+          <summary>More limits: programs, number of uses</summary>
+          <button type="button" class="btn sm step-back">← Back</button>
+          <div class="limit-grid"><label for="lease-cmds">Only for programs</label><input id="lease-cmds" autocomplete="off" spellcheck="false" placeholder="Absolute paths, comma-separated">
+          <label for="lease-uses">Max uses per secret</label><input id="lease-uses" type="number" min="1" max="10000" placeholder="unlimited"></div>
+          <p class="hint">Program paths are pinned at grant time. Shells are refused for program-scoped access.</p>
+        </details>
+        <p id="lease-help" class="banner warn lease-help"></p>
+        <p class="hint">Ends early on revocation, relevant access or value changes, deletion, or daemon restart. Agent access does not end on screen lock.</p>
+        <button type="button" class="btn lease-require-touch" id="lease-require-touch" hidden>Require Touch ID instead</button>
+        <div class="actions"><span class="muted small">Touch ID is asked once to confirm.</span><button type="button" class="btn primary" id="lease-grant">Give access</button></div>
+      </div>
+
+      <h3 class="sec">Recent activity</h3>
+      <div class="card flat activity">
+        <table class="list audit">
+          <tbody id="activity-rows"></tbody>
+        </table>
+        <div id="activity-empty" class="empty small" hidden><p>Not used yet.</p></div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn" id="detail-close">Done</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- AWS profile dialog -->
+  <dialog id="aws-dialog" aria-labelledby="aws-title">
+    <form id="aws-form" method="dialog">
+      <h2 id="aws-title">Add AWS profile</h2>
+      <fieldset class="seg" id="aws-kind">
+        <legend class="sr-only">Credential type</legend>
+        <label><input type="radio" name="aws-kind" value="sso" checked><span>AWS SSO</span></label>
+        <label><input type="radio" name="aws-kind" value="keys"><span>Paste keys</span></label>
+      </fieldset>
+      <label class="lbl" for="aws-profile">Profile name</label>
+      <input id="aws-profile" required autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*" placeholder="app-staging">
+
+      <div id="aws-sso-fields">
+        <p class="muted small">Karambit signs in to AWS IAM Identity Center for you and gives agents short-lived role credentials, renewed automatically. No keys are pasted or stored.</p>
+        <label class="lbl" for="aws-portal">Portal</label>
+        <select id="aws-portal" required></select>
+        <div id="aws-new-portal" class="new-portal" hidden>
+          <button type="button" id="aws-portal-back" class="btn sm step-back">← Back to portals</button>
+          <label class="lbl" for="aws-portal-name">Portal name</label>
+          <input id="aws-portal-name" autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,31}" placeholder="main">
+          <label class="lbl" for="aws-start-url">AWS access portal URL</label>
+          <input id="aws-start-url" type="url" autocomplete="off" spellcheck="false" placeholder="Your AWS access portal URL">
+          <label class="lbl" for="aws-sso-region">Identity Center region</label>
+          <input id="aws-sso-region" autocomplete="off" spellcheck="false" placeholder="us-east-1">
+        </div>
+        <div class="grid2">
+          <div><label class="lbl" for="aws-account">Account ID</label>
+            <input id="aws-account" inputmode="numeric" autocomplete="off" spellcheck="false" pattern="[0-9]{12}" maxlength="12" placeholder="123456789012"></div>
+          <div><label class="lbl" for="aws-role">Role (permission set)</label>
+            <input id="aws-role" autocomplete="off" spellcheck="false" placeholder="ReadOnly"></div>
+        </div>
+      </div>
+
+      <div id="aws-key-fields" hidden>
+      <p class="muted small">Paste the credentials block exactly as the AWS console shows it. The <code>export</code>, PowerShell and <code>[profile]</code> formats all work.</p>
+      <label class="lbl" for="aws-paste">Credentials</label>
+      <textarea id="aws-paste" class="paste" rows="4" autocomplete="off" spellcheck="false"
+        placeholder='export AWS_ACCESS_KEY_ID="ASIA…"&#10;export AWS_SECRET_ACCESS_KEY="…"&#10;export AWS_SESSION_TOKEN="…"'></textarea>
+      <p id="aws-detected" class="hint" aria-live="polite"></p>
+      </div>
+      <label class="lbl" for="aws-region">Region for commands <span class="muted">(optional)</span></label>
+      <input id="aws-region" autocomplete="off" spellcheck="false" placeholder="us-east-1">
+
+      <fieldset class="access-pick">
+        <legend class="lbl">Access</legend>
+        <div id="aws-access" class="opts"></div>
+      </fieldset>
+      <div class="opts" id="aws-verify-row" hidden>
+        <label class="row">
+          <span class="row-text"><b>Check with AWS before saving</b><small>Runs <code>sts get-caller-identity</code>. Needs the aws CLI.</small></span>
+          <span class="sw"><input type="checkbox" id="aws-verify" checked><span class="track" aria-hidden="true"></span></span>
+        </label>
+      </div>
+
+      <p id="aws-error" class="form-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="aws-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="aws-submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- AWS sign-in (device code). Only the code + AWS's own approval page reach this page. -->
+  <dialog id="signin-dialog" aria-labelledby="signin-title" aria-describedby="signin-msg">
+    <form method="dialog">
+      <h2 id="signin-title">Sign in to AWS</h2>
+      <p id="signin-portal" class="muted small"></p>
+      <p id="signin-msg" role="status" aria-live="polite"></p>
+      <div id="signin-code-box" class="code-box" hidden>
+        <span class="code-label">Check the browser shows this code</span>
+        <span id="signin-code" class="code"></span>
+        <span id="signin-expiry" class="muted small"></span>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn" id="signin-copy" hidden>Copy code</button>
+        <button type="button" class="btn" id="signin-browser" hidden>Open browser again</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="signin-cancel">Cancel</button>
+        <button type="button" class="btn primary" id="signin-retry" hidden>Try again</button>
+        <button type="button" class="btn primary" id="signin-done" hidden>Done</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Add AWS access portal -->
+  <dialog id="portal-dialog" aria-labelledby="portal-title">
+    <form id="portal-form" method="dialog">
+      <h2 id="portal-title">Add AWS access portal</h2>
+      <p class="muted small">Your organization's IAM Identity Center sign-in page. You'll sign in once in the browser; agents then use the profiles you add on this portal.</p>
+      <label class="lbl" for="portal-name">Short name</label>
+      <input id="portal-name" required autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,31}" placeholder="main">
+      <label class="lbl" for="portal-url">AWS access portal URL</label>
+      <input id="portal-url" type="url" required autocomplete="off" spellcheck="false" placeholder="Your AWS access portal URL">
+      <label class="lbl" for="portal-region">Identity Center region</label>
+      <input id="portal-region" required autocomplete="off" spellcheck="false" placeholder="us-east-1">
+      <p class="hint">Shown in the AWS access portal's settings, or in the URL of the sign-in page.</p>
+      <p id="portal-error" class="form-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="portal-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="portal-submit">Add and sign in</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Paper backup: show a new key, then retype it; or retype to verify -->
+  <dialog id="paper-dialog" aria-labelledby="paper-title">
+    <h2 id="paper-title">Paper backup</h2>
+    <div id="paper-show" hidden>
+      <p>Write down each row <b>and its check code</b>. Only 0 is used for zero: there is no O, 1, B or I.</p>
+      <ol id="paper-rows" class="paper-rows"></ol>
+      <div class="banner warn has-icon"><span>Anyone with this sheet can decrypt every secret. Don't photograph or save it. It isn't shown again.</span></div>
+      <div class="actions"><button type="button" class="btn" id="paper-cancel">Cancel</button><button type="button" class="btn primary" id="paper-written">I've written it down</button></div>
+    </div>
+    <form id="paper-type" hidden>
+      <p id="paper-type-intro">Type each row from your sheet. Spaces and case don't matter; the check code is optional.</p>
+      <div id="paper-inputs" class="paper-inputs"></div>
+      <p id="paper-error" class="form-error" role="alert"></p>
+      <div class="actions"><button type="button" class="link" id="paper-back">Show the key again</button><span class="sp"></span><button type="button" class="btn" id="paper-type-cancel">Cancel</button><button type="submit" class="btn primary" id="paper-submit">Confirm</button></div>
+    </form>
+  </dialog>
+
+  <!-- Confirm dialog (window.confirm is a no-op in WKWebView) -->
+  <dialog id="confirm-dialog" class="small" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
+    <form method="dialog">
+      <h2 id="confirm-title">Are you sure?</h2>
+      <div id="confirm-msg" class="muted"></div>
+      <div class="actions">
+        <button type="button" class="btn" id="confirm-no">Cancel</button>
+        <button type="button" class="btn danger" id="confirm-yes">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="folder-dialog" aria-labelledby="folder-dialog-title">
+    <form id="folder-form"><h2 id="folder-dialog-title">New folder</h2><p class="hint">A folder starts with its first secret.</p>
+    <label class="lbl" for="folder-name">Folder name</label><input id="folder-name" required pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*(/[A-Za-z0-9_\-][A-Za-z0-9._\-]*)*" autocomplete="off">
+    <div class="actions"><button type="button" class="btn" id="folder-cancel">Cancel</button><button class="btn primary" type="submit">Add first secret</button></div></form>
+  </dialog>
+  <dialog id="palette-dialog" aria-labelledby="palette-title"><h2 id="palette-title" class="sr-only">Find anything</h2>
+    <label class="sr-only" for="palette-query">Search folders, secrets and sources</label><input id="palette-query" role="combobox" aria-controls="palette-results" aria-expanded="true" aria-autocomplete="list" type="search" placeholder="Find a folder, secret or source" autocomplete="off">
+    <div id="palette-results" role="listbox" aria-label="Search results"></div><p class="hint">↑ ↓ Move · Enter opens a folder or copies a secret · ⌘I Details · Esc closes</p>
+  </dialog>
+  <dialog id="source-dialog" aria-labelledby="source-title"><form id="source-form">
+    <h2 id="source-title">Link source <span class="tag beta">Beta</span></h2><p class="hint">Only connection credentials are stored locally. Source changes ask for Touch ID and invalidate existing grants.</p>
+    <label class="lbl" for="source-name">Folder / source name</label><input id="source-name" required autocomplete="off">
+    <label class="lbl" for="source-kind">Kind</label><select id="source-kind"></select>
+    <label class="lbl" for="source-endpoint">Endpoint</label><input id="source-endpoint" required autocomplete="off" spellcheck="false">
+    <label class="lbl" for="source-auth">Authentication method</label><input id="source-auth" value="token" required autocomplete="off">
+    <label class="lbl" for="source-credential">Credential (leave empty on retarget to keep existing)</label><input id="source-credential" type="password" autocomplete="new-password" spellcheck="false">
+    <p class="hint">Never put credentials in the endpoint or policy.</p>
+    <label class="lbl" for="source-policy">Policy JSON (non-secret)</label><textarea id="source-policy" rows="3" spellcheck="false">{}</textarea>
+    <p id="source-error" class="form-error" role="alert"></p><div class="actions"><button type="button" class="btn" id="source-cancel">Cancel</button><button type="submit" class="btn primary" id="source-save">Link source</button></div>
+  </form></dialog>
+  <div class="toasts">
+    <div id="toast-err" role="alert"></div>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+  </div>
+  <script src="search.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

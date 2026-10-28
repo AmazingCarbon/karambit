@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Karambit keeps secrets away from agents</title>
+<meta name="description" content="How Karambit lets AI agents use secrets without seeing them: storage, run, redaction, AWS credentials, .env.schema, and the honest limits.">
+<style>
+@font-face { font-family: "Bricolage Grotesque"; src: url("../app/ui/fonts/bricolage-grotesque.woff2") format("woff2"); font-weight: 200 800; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("../app/ui/fonts/jetbrains-mono.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
+@font-face { font-family: "Pixelify Sans"; src: url("../app/ui/fonts/pixelify-sans.woff2") format("woff2"); font-weight: 400 700; font-display: swap; }
+
+:root {
+  color-scheme: dark;
+  --bg: #0f1319; --side: #0b0e13; --surface: #161c25; --surface-2: #1d2530;
+  --line: #263040; --line-2: #33405a;
+  --fg: #e6ebf1; --fg-2: #a3aebd;
+  --accent: #3cc79a; --accent-soft: #173029; --on-accent: #0f1319;
+  --warn: #f0d9a4; --warn-soft: #2d2618; --warn-line: #4a3f26;
+  --bad: #ff8a7c; --bad-soft: #33201f;
+  --info: #8fb4ff; --info-soft: #1c2638;
+  --ui: "Bricolage Grotesque", -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --pixel: "Pixelify Sans", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scrollbar-color: var(--line-2) var(--bg); }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 var(--ui); -webkit-font-smoothing: antialiased; }
+::selection { background: var(--accent); color: var(--on-accent); }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+code, .mono { font-family: var(--mono); font-size: .88em; }
+code { background: var(--surface-2); padding: 1px 6px; color: #cfe9de; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .travel { display: none; } }
+
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+header.top { border-bottom: 1px solid var(--line); background: var(--side); }
+header.top .wrap { display: flex; align-items: center; gap: 14px; height: 60px; }
+.brand { font: 600 18px var(--pixel); letter-spacing: .06em; color: var(--fg); text-decoration: none; display: flex; gap: 10px; align-items: center; }
+.brand svg { width: 34px; height: 18px; }
+nav.toc { margin-left: auto; display: flex; gap: 18px; font-size: 14px; flex-wrap: wrap; }
+nav.toc a { color: var(--fg-2); text-decoration: none; }
+nav.toc a:hover { color: var(--fg); }
+@media (max-width: 760px) { nav.toc { display: none; } }
+
+.hero { padding: 72px 0 40px; }
+.hero h1 { font-size: clamp(2.2rem, 5.4vw, 3.9rem); line-height: 1.05; letter-spacing: -0.03em; margin: 0 0 18px; max-width: 18ch; text-wrap: balance; }
+.hero h1 em { font-style: normal; color: var(--accent); }
+.hero p.lede { font-size: 1.2rem; color: var(--fg-2); max-width: 62ch; margin: 0; }
+.truth { margin-top: 34px; display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); background: var(--surface); }
+.truth > div { padding: 20px 22px; }
+.truth > div + div { border-left: 1px solid var(--line); }
+.truth .head { font-size: 15px; font-weight: 700; margin: 0 0 8px; display: flex; gap: 8px; align-items: center; }
+.truth p { margin: 0; color: var(--fg-2); font-size: 15px; }
+.truth .yes .head { color: var(--accent); } .truth .no .head { color: var(--warn); }
+@media (max-width: 680px) { .truth { grid-template-columns: 1fr; } .truth > div + div { border-left: 0; border-top: 1px solid var(--line); } }
+
+section.part { padding: 64px 0 24px; border-top: 1px solid var(--line); }
+section.part > .wrap > h2 { font-size: clamp(1.6rem, 3.4vw, 2.3rem); letter-spacing: -0.025em; line-height: 1.15; margin: 0 0 10px; max-width: 26ch; text-wrap: balance; }
+section.part > .wrap > p.intro { color: var(--fg-2); max-width: 66ch; margin: 0 0 30px; font-size: 1.05rem; }
+h3 { font-size: 1.3rem; margin: 40px 0 12px; letter-spacing: -0.015em; }
+
+/* ---- chat bubbles ---- */
+.chat { display: flex; flex-direction: column; gap: 14px; max-width: 760px; margin: 24px 0 8px; }
+.msg { display: flex; gap: 12px; align-items: flex-start; max-width: 92%; }
+.msg.right { align-self: flex-end; flex-direction: row-reverse; }
+.who { flex: none; width: 38px; height: 38px; display: grid; place-items: center; background: var(--surface-2); border: 1px solid var(--line-2); }
+.who svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.bubble { position: relative; background: var(--surface); border: 1px solid var(--line); padding: 10px 14px 11px; }
+.bubble b.name { display: block; font-size: 12px; letter-spacing: .03em; color: var(--fg-2); font-weight: 600; margin-bottom: 2px; }
+.bubble p { margin: 0; }
+.bubble p + p { margin-top: 6px; }
+.bubble::before { content: ""; position: absolute; top: 13px; left: -7px; width: 12px; height: 12px; background: inherit; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); transform: rotate(45deg); }
+.msg.right .bubble::before { left: auto; right: -7px; transform: rotate(-135deg); }
+.agent .who { color: var(--info); } .agent .bubble { background: var(--info-soft); border-color: #2a3a58; }
+.agent .bubble::before { border-color: #2a3a58; }
+.karambit .who { color: var(--accent); } .karambit .bubble { background: var(--accent-soft); border-color: #24503f; }
+.karambit .bubble::before { border-color: #24503f; }
+.you .who { color: var(--warn); } .you .bubble { background: var(--warn-soft); border-color: var(--warn-line); }
+.you .bubble::before { border-color: var(--warn-line); }
+.prog .who { color: var(--fg); }
+.redacted { font-family: var(--mono); font-size: .86em; background: #0b0e13; color: var(--accent); padding: 1px 6px; white-space: nowrap; }
+.secretval { font-family: var(--mono); font-size: .86em; background: var(--bad-soft); color: var(--bad); padding: 1px 6px; }
+
+/* ---- diagrams ---- */
+figure.diagram { margin: 26px 0 8px; background: var(--side); border: 1px solid var(--line); padding: 18px 18px 12px; }
+figure.diagram .scroll { overflow-x: auto; }
+figure.diagram svg { display: block; width: 100%; min-width: 680px; height: auto; }
+figcaption { color: var(--fg-2); font-size: 14px; margin-top: 10px; max-width: 70ch; }
+.swipe { display: none; font-size: 12.5px; color: var(--fg-2); margin: 0 0 8px; }
+@media (max-width: 720px) { .swipe { display: block; } figure.diagram { padding: 14px 12px 10px; } }
+svg text { font-family: var(--ui); fill: var(--fg); }
+svg .lane-head { font-weight: 700; font-size: 14px; }
+svg .lane-sub { font-size: 12.5px; fill: var(--fg-2); }
+svg .lbl { font-size: 12.5px; }
+svg .lbl-mono { font-family: var(--mono); font-size: 12px; }
+svg .dim { fill: var(--fg-2); }
+svg .life { stroke: var(--line-2); stroke-dasharray: 3 5; }
+svg .arrow { stroke: var(--fg-2); stroke-width: 1.5; fill: none; }
+svg .arrow.green { stroke: var(--accent); }
+svg .arrow.red { stroke: var(--bad); }
+svg .arrow.blue { stroke: var(--info); }
+svg .arrow.yellow { stroke: var(--warn); }
+svg .note { fill: var(--surface); stroke: var(--line-2); }
+svg .chipred { fill: var(--bad-soft); stroke: #5a2e2a; }
+svg .chipgreen { fill: var(--accent-soft); stroke: #24503f; }
+svg .travel { fill: var(--bad); }
+
+/* ---- where-the-value-goes rows ---- */
+.modes { display: grid; gap: 0; border: 1px solid var(--line); margin-top: 26px; padding: 0; }
+.mode { display: grid; grid-template-columns: 170px 1fr; border-top: 1px solid var(--line); }
+.mode:first-child { border-top: 0; }
+.mode > header { padding: 18px; background: var(--surface); border-right: 1px solid var(--line); grid-row: span 2; }
+.mode > header b { display: block; font-size: 15px; }
+.mode > header code { display: inline-block; margin-top: 6px; font-size: 12px; }
+.mode .flow { display: flex; align-items: center; gap: 0; padding: 18px; flex-wrap: wrap; row-gap: 10px; }
+.node { border: 1px solid var(--line-2); background: var(--surface); padding: 8px 12px; min-width: 112px; }
+.node b { display: block; font-size: 14px; }
+.node small { color: var(--fg-2); font-size: 12px; }
+.node.sees { border-color: #5a2e2a; background: var(--bad-soft); }
+.node.sees small { color: #f3b5ad; }
+.node.safe { border-color: #24503f; background: var(--accent-soft); }
+.node.safe small { color: #a6dcc7; }
+.link { width: 34px; height: 2px; background: var(--line-2); position: relative; flex: none; }
+.link::after { content: ""; position: absolute; right: -1px; top: -4px; border: 5px solid transparent; border-left: 7px solid var(--line-2); border-right: 0; }
+.mode .verdict { grid-column: 2; padding: 0 18px 16px; color: var(--fg-2); font-size: 14.5px; margin: 0; }
+@media (max-width: 760px) { .mode { grid-template-columns: 1fr; } .mode > header { grid-row: auto; border-right: 0; border-bottom: 1px solid var(--line); } .mode .verdict { grid-column: 1; } .link { width: 18px; } .node { min-width: 0; } }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13.5px; color: var(--fg-2); margin-top: 12px; }
+.legend span::before { content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 7px; vertical-align: -1px; border: 1px solid; }
+.legend .l-sees::before { background: var(--bad-soft); border-color: #5a2e2a; }
+.legend .l-safe::before { background: var(--accent-soft); border-color: #24503f; }
+.legend .l-plain::before { background: var(--surface); border-color: var(--line-2); }
+
+/* ---- two columns: blocked / possible ---- */
+.split { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); margin-top: 22px; }
+.split > div { padding: 20px 22px; }
+.split > div + div { border-left: 1px solid var(--line); }
+.split h3.col { margin: 0 0 12px; font-size: 16px; display: flex; gap: 8px; align-items: center; }
+.split ul { margin: 0; padding: 0; list-style: none; }
+.split li { padding: 7px 0; border-top: 1px solid var(--line); font-size: 15px; display: grid; grid-template-columns: 22px 1fr; gap: 8px; }
+.split li:first-child { border-top: 0; }
+.split li svg { width: 16px; height: 16px; margin-top: 4px; stroke-width: 2.2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.split h3.col svg { width: 16px; height: 16px; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.split .blocked h3.col, .split .blocked h3.col svg, .split .blocked li svg { color: var(--accent); stroke: var(--accent); }
+.split .possible h3.col, .split .possible h3.col svg, .split .possible li svg { color: var(--warn); stroke: var(--warn); }
+@media (max-width: 760px) { .split { grid-template-columns: 1fr; } .split > div + div { border-left: 0; border-top: 1px solid var(--line); } }
+
+/* ---- step strip ---- */
+.steps { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); margin-top: 24px; counter-reset: s; }
+.step { padding: 18px; border-left: 1px solid var(--line); position: relative; }
+.step:first-child { border-left: 0; }
+.step b { display: block; margin-bottom: 4px; }
+.step p { margin: 0; color: var(--fg-2); font-size: 14.5px; }
+.step code { font-size: 12px; }
+.step::after { content: ""; position: absolute; right: -8px; top: 26px; width: 14px; height: 14px; background: var(--bg); border-top: 1px solid var(--line); border-right: 1px solid var(--line); transform: rotate(45deg); z-index: 1; }
+.step:last-child::after { display: none; }
+@media (max-width: 860px) { .steps { grid-template-columns: 1fr 1fr; } .step:nth-child(3) { border-left: 0; } .step:nth-child(n+3) { border-top: 1px solid var(--line); } .step::after { display: none; } }
+@media (max-width: 520px) { .steps { grid-template-columns: 1fr; } .step { border-left: 0; } .step + .step { border-top: 1px solid var(--line); } }
+
+pre.code { background: var(--side); border: 1px solid var(--line); padding: 14px 16px; overflow-x: auto; font: 13px/1.65 var(--mono); color: #cfe9de; margin: 18px 0; }
+pre.code .c { color: #6f7d90; }
+pre.code .k { color: var(--accent); }
+
+.callout { border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--warn); padding: 14px 18px; margin: 26px 0; max-width: 760px; }
+.callout p { margin: 0; color: #e8dcc0; }
+.callout b { color: var(--warn); }
+
+details.faq { border-top: 1px solid var(--line); max-width: 820px; }
+details.faq:last-of-type { border-bottom: 1px solid var(--line); }
+details.faq summary { cursor: pointer; padding: 16px 0; font-weight: 600; list-style: none; display: flex; justify-content: space-between; gap: 16px; }
+details.faq summary::-webkit-details-marker { display: none; }
+details.faq summary::after { content: ""; flex: none; width: 9px; height: 9px; margin-top: 8px; border-right: 2px solid var(--fg-2); border-bottom: 2px solid var(--fg-2); transform: rotate(45deg); transition: transform .18s cubic-bezier(.2,.7,.3,1); }
+details.faq[open] summary::after { transform: rotate(-135deg); }
+details.faq > div { padding: 0 0 18px; color: var(--fg-2); max-width: 70ch; }
+details.faq > div p { margin: 0 0 8px; }
+
+footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 30px 0 60px; color: var(--fg-2); font-size: 14px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-agent" viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="1"/><path d="M12 4v4M9 13h.01M15 13h.01M9.5 16.5h5M3 12v3M21 12v3"/></symbol>
+  <symbol id="i-karambit" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9.5 12.5l2 2 3.5-4"/></symbol>
+  <symbol id="i-you" viewBox="0 0 24 24"><path d="M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></symbol>
+  <symbol id="i-prog" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="1"/><path d="M7 10l3 2-3 2M12.5 14.5h4"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .6-8A6 6 0 0 0 6.2 9.5 4.3 4.3 0 0 0 7 18z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3zM12 10v4M12 17.5h.01"/></symbol>
+</svg>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><svg viewBox="0 0 34 18" aria-hidden="true"><path d="M2 14 L14 6 L30 6" stroke="#e6ebf1" stroke-width="3" fill="none"/><rect x="24" y="9" width="7" height="7" fill="none" stroke="#3cc79a" stroke-width="2.4"/></svg>KARAMBIT</a>
+    <nav class="toc" aria-label="Sections">
+      <a href="#run">The run flow</a><a href="#copy">Can it keep a copy?</a><a href="#proxy">Proxying?</a><a href="#aws">AWS</a><a href="#env">.env files</a><a href="#faq">More questions</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap hero">
+    <h1>Your agents get to <em>use</em> secrets, not see them.</h1>
+    <p class="lede">How Karambit lets Claude Code, Codex, pi and friends run your tests, deploys and AWS commands with real credentials, while the secret values stay out of the agent's context, transcript and logs. With the parts it does not do, stated plainly.</p>
+    <div class="truth">
+      <div class="yes"><p class="head"><svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2"><use href="#i-check"/></svg>What it does</p><p>Keeps values out of the agent's own process and context window, asks for your fingerprint where you want it, binds each use to one command, redacts output, and logs who used what.</p></div>
+      <div class="no"><p class="head"><svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2"><use href="#i-warn"/></svg>What it doesn't</p><p>It is not a sandbox. A program the agent launches with a secret does get that secret. A determined agent can make that program leak it. Karambit makes that hard, slow and loud, not impossible.</p></div>
+    </div>
+  </div>
+
+  <!-- ===================== AT REST ===================== -->
+  <section class="part" id="rest">
+    <div class="wrap">
+      <h2>Where secrets live when nobody is using them</h2>
+      <p class="intro">Three places, three jobs. The disk holds only ciphertext. The keys that open it never leave a chip in your Mac. Unlocked values exist only briefly, in one process's memory.</p>
+      <figure class="diagram">
+        <p class="swipe" aria-hidden="true">Diagram is wide: swipe sideways to see all of it →</p>
+        <div class="scroll" tabindex="0" aria-label="Diagram, scrolls sideways">
+        <svg viewBox="0 0 860 250" role="img" aria-labelledby="rest-t rest-d">
+          <title id="rest-t">Storage layout</title>
+          <desc id="rest-d">Encrypted files on disk, three keys inside the Secure Enclave, and the Karambit daemon holding unlocked keys and tokens in RAM only.</desc>
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#a3aebd"/></marker>
+            <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#3cc79a"/></marker>
+            <marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#ff8a7c"/></marker>
+            <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8fb4ff"/></marker>
+            <marker id="ahy" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#f0d9a4"/></marker>
+          </defs>
+          <rect x="10" y="20" width="250" height="210" class="note"/>
+          <text x="28" y="48" class="lane-head">Disk</text>
+          <text x="28" y="66" class="lane-sub">~/.local/share/karambit/secrets/</text>
+          <rect x="28" y="84" width="214" height="30" class="chipgreen"/><text x="40" y="104" class="lbl-mono">stripe/live-key  ciphertext</text>
+          <rect x="28" y="122" width="214" height="30" class="chipgreen"/><text x="40" y="142" class="lbl-mono">aws/111…-admin   ciphertext</text>
+          <rect x="28" y="160" width="214" height="30" class="chipgreen"/><text x="40" y="180" class="lbl-mono">myapp/DB_URL     ciphertext</text>
+          <text x="28" y="214" class="lane-sub">Each value: ChaCha20 under its own key (DEK)</text>
+
+          <rect x="305" y="20" width="250" height="210" class="note"/>
+          <text x="323" y="48" class="lane-head">Secure Enclave (the chip)</text>
+          <text x="323" y="66" class="lane-sub">keys are made here and never leave</text>
+          <rect x="323" y="84" width="214" height="30" class="chipgreen"/><text x="335" y="104" class="lbl">bio · needs your Touch ID</text>
+          <rect x="323" y="122" width="214" height="30" class="chipgreen"/><text x="335" y="142" class="lbl">open · only while unlocked</text>
+          <rect x="323" y="160" width="214" height="30" class="chipgreen"/><text x="335" y="180" class="lbl">agent · works while screen locked</text>
+          <text x="323" y="214" class="lane-sub">Unwraps a DEK; can't be copied off the Mac</text>
+
+          <rect x="600" y="20" width="250" height="210" class="note"/>
+          <text x="618" y="48" class="lane-head">Daemon RAM</text>
+          <text x="618" y="66" class="lane-sub">one per-user process, nothing on disk</text>
+          <rect x="618" y="84" width="214" height="30" class="chipred"/><text x="630" y="104" class="lbl">lease keys you granted</text>
+          <rect x="618" y="122" width="214" height="30" class="chipred"/><text x="630" y="142" class="lbl">AWS SSO sign-in tokens</text>
+          <rect x="618" y="160" width="214" height="30" class="chipred"/><text x="630" y="180" class="lbl">short-lived AWS role keys</text>
+          <text x="618" y="214" class="lane-sub">Gone on expiry, block, revoke or restart</text>
+
+          <path d="M262 135 H300" class="arrow green" marker-end="url(#ahg)"/>
+          <path d="M557 135 H595" class="arrow red" marker-end="url(#ahr)"/>
+        </svg>
+        </div>
+        <figcaption>Copying the whole vault folder to another machine gets an attacker ciphertext and key handles that only work on this Mac's chip. Green = safe at rest, red = a usable value, which only ever exists in RAM.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ===================== RUN FLOW ===================== -->
+  <section class="part" id="run">
+    <div class="wrap">
+      <h2>What happens when an agent needs a secret</h2>
+      <p class="intro">The agent never asks for the value. It asks Karambit to <b>run a program</b> with the secret attached. Here is one run, start to finish.</p>
+
+      <div class="chat" aria-label="Example conversation">
+        <div class="msg agent"><div class="who"><svg><use href="#i-agent"/></svg></div><div class="bubble"><b class="name">Claude Code</b><p>I need to run the payment tests. <code>karambit run -- npm test</code></p></div></div>
+        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>Asking the kernel who you are... you're <b>claude</b>, launched from this terminal. This project wants <code>stripe/test-key</code>, set to <i>Agents · Touch ID</i>.</p></div></div>
+        <div class="msg you"><div class="who"><svg><use href="#i-you"/></svg></div><div class="bubble"><b class="name">You</b><p>Touch ID. Yes, go ahead.</p></div></div>
+        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>Starting <code>npm test</code> in <code>~/app</code> with <code>STRIPE_KEY</code> set. This launch ticket works once, for this exact command and folder.</p></div></div>
+        <div class="msg prog"><div class="who"><svg><use href="#i-prog"/></svg></div><div class="bubble"><b class="name">npm test (the program)</b><p>charge created with key <span class="secretval">sk_test_51Hq…</span> ✓ 12 passed</p></div></div>
+        <div class="msg agent"><div class="who"><svg><use href="#i-agent"/></svg></div><div class="bubble"><b class="name">What Claude actually reads</b><p>charge created with key <span class="redacted">[REDACTED:stripe/test-key]</span> 12 passed</p></div></div>
+      </div>
+
+      <figure class="diagram">
+        <p class="swipe" aria-hidden="true">Diagram is wide: swipe sideways to see all of it →</p>
+        <div class="scroll" tabindex="0" aria-label="Diagram, scrolls sideways">
+        <svg viewBox="0 0 880 560" role="img" aria-labelledby="run-t run-d">
+          <title id="run-t">Sequence of one karambit run</title>
+          <desc id="run-d">The agent asks the daemon to run a command. The daemon identifies the caller via the kernel, asks you for Touch ID, has the Secure Enclave unwrap the key, launches the program through a pinned shim with the secret in its environment, and returns redacted output to the agent. Every step is written to the audit log.</desc>
+          <g text-anchor="middle">
+            <text x="80" y="30" class="lane-head">Agent</text><text x="80" y="48" class="lane-sub">claude / codex / pi</text>
+            <text x="270" y="30" class="lane-head">Karambit</text><text x="270" y="48" class="lane-sub">CLI + daemon</text>
+            <text x="450" y="30" class="lane-head">You</text><text x="450" y="48" class="lane-sub">Touch ID</text>
+            <text x="610" y="30" class="lane-head">Secure Enclave</text><text x="610" y="48" class="lane-sub">the chip</text>
+            <text x="790" y="30" class="lane-head">Program</text><text x="790" y="48" class="lane-sub">npm test</text>
+          </g>
+          <path d="M80 62V540M270 62V540M450 62V540M610 62V540M790 62V540" class="life"/>
+
+          <path d="M80 92H264" class="arrow blue" marker-end="url(#ahb)"/>
+          <text x="90" y="84" class="lbl-mono">karambit run -- npm test</text>
+
+          <rect x="282" y="108" width="300" height="46" class="note"/>
+          <text x="294" y="127" class="lbl">Who is asking? Read from the kernel,</text>
+          <text x="294" y="144" class="lbl">not trusted from the request: <tspan class="lbl-mono">claude</tspan></text>
+
+          <path d="M270 186H444" class="arrow yellow" marker-end="url(#ahy)"/>
+          <text x="282" y="178" class="lbl">Touch ID for stripe/test-key?</text>
+          <path d="M450 216H276" class="arrow yellow" marker-end="url(#ahy)"/>
+          <text x="300" y="208" class="lbl">fingerprint matches</text>
+
+          <path d="M270 254H604" class="arrow green" marker-end="url(#ahg)"/>
+          <text x="282" y="246" class="lbl">unwrap this secret's key, please</text>
+          <path d="M610 284H276" class="arrow green" marker-end="url(#ahg)"/>
+          <text x="300" y="276" class="lbl">done (my private key stays inside me)</text>
+
+          <path d="M270 330H784" class="arrow red" marker-end="url(#ahr)"/>
+          <text x="282" y="322" class="lbl">launch via pinned shim: one-time ticket for this command + folder,</text>
+          <text x="282" y="350" class="lbl-mono">STRIPE_KEY=sk_test_51Hq… in the program's environment only</text>
+          <circle r="5" class="travel"><animateMotion dur="3.2s" repeatCount="indefinite" path="M270 330H784"/></circle>
+
+          <path d="M790 392H276" class="arrow red" marker-end="url(#ahr)"/>
+          <text x="400" y="384" class="lbl-mono">stdout: key sk_test_51Hq… ✓ passed</text>
+
+          <rect x="282" y="408" width="250" height="46" class="chipgreen"/>
+          <text x="294" y="427" class="lbl">Redact: every known secret,</text>
+          <text x="294" y="444" class="lbl">even when split or truncated</text>
+
+          <path d="M270 484H86" class="arrow blue" marker-end="url(#ahb)"/>
+          <text x="96" y="476" class="lbl-mono">key [REDACTED:stripe/test-key]</text>
+
+          <rect x="282" y="500" width="330" height="30" class="note"/>
+          <text x="294" y="520" class="lbl">Audit log: claude · npm test · ~/app · stripe/test-key</text>
+        </svg>
+        </div>
+        <figcaption>Red lines carry the real value. Notice they never touch the Agent lane: the agent sends a command and receives redacted text. The program in the middle is the only thing that holds the secret.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ===================== COPY ===================== -->
+  <section class="part" id="copy">
+    <div class="wrap">
+      <h2>"Can't the agent just keep a copy?"</h2>
+      <p class="intro">Directly, no. Through the program it launches, yes, if it really tries. That's the honest answer, and it's why the controls below exist.</p>
+
+      <div class="chat">
+        <div class="msg agent"><div class="who"><svg><use href="#i-agent"/></svg></div><div class="bubble"><b class="name">Agent</b><p><code>karambit get stripe/live-key</code></p></div></div>
+        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>Refused: revealing a secret is human-only, and your process chain includes an agent (claude). Use the app or a plain terminal.</p></div></div>
+        <div class="msg agent"><div class="who"><svg><use href="#i-agent"/></svg></div><div class="bubble"><b class="name">Agent, getting creative</b><p><code>karambit run -e X=stripe/live-key -- sh -c 'echo $X &gt; /tmp/x'</code></p></div></div>
+        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>That would work for an <i>Agents · no prompt</i> secret, and I'd log it. For this one you set <i>Only me</i>, so: refused. For <i>Touch ID</i> secrets, your human gets a fingerprint prompt naming the exact command.</p></div></div>
+      </div>
+
+      <div class="split">
+        <div class="blocked">
+          <h3 class="col"><svg width="16" height="16"><use href="#i-check"/></svg>Blocked for agents</h3>
+          <ul>
+            <li><svg><use href="#i-check"/></svg><span>Reading values: <code>get</code>, reveal, copy to clipboard</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Decrypting the vault files (keys are in the chip)</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Reading the daemon's memory (macOS SIP refuses it, tested)</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Granting itself leases, relaxing access, adding or deleting secrets</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Using <i>Only me</i> secrets at all</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Faking a Touch ID press</span></li>
+          </ul>
+        </div>
+        <div class="possible">
+          <h3 class="col"><svg width="16" height="16"><use href="#i-warn"/></svg>Still possible</h3>
+          <ul>
+            <li><svg><use href="#i-warn"/></svg><span>A launched program writing the value to a file or sending it over the network (redaction only covers screen output)</span></li>
+            <li><svg><use href="#i-warn"/></svg><span>Another program running as you reading that program's environment while it runs (<code>ps -E</code>)</span></li>
+            <li><svg><use href="#i-warn"/></svg><span>A process that double-forks and wipes its environment can look human to detection; Touch ID is the real backstop</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>What keeps that in check</h3>
+      <div class="steps">
+        <div class="step"><b>Touch ID per use</b><p>For sensitive secrets an agent must wait for your finger, and the prompt names the command.</p></div>
+        <div class="step"><b>Narrow leases</b><p>Temporary access you grant for one command, one folder, a few uses, a few hours.</p></div>
+        <div class="step"><b><code>--jail</code></b><p>Experimental macOS sandbox: no network except allowed local ports, most files off-limits.</p></div>
+        <div class="step"><b>Audit + block</b><p>Every use is logged with agent, session and command. <code>karambit block</code> refuses all agents at once.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== PROXY ===================== -->
+  <section class="part" id="proxy">
+    <div class="wrap">
+      <h2>"Are you proxying the secrets?"</h2>
+      <p class="intro">Depends on the mode. Only one of the three is a true proxy, and it's the strongest one.</p>
+      <div class="modes" role="list">
+        <div class="mode" role="listitem">
+          <header><b>Run with env vars</b><code>karambit run</code></header>
+          <div class="flow">
+            <div class="node safe"><b>Agent</b><small>sends a command</small></div><div class="link"></div>
+            <div class="node"><b>Karambit</b><small>checks, decrypts</small></div><div class="link"></div>
+            <div class="node sees"><b>Program</b><small>has the value</small></div><div class="link"></div>
+            <div class="node"><b>Stripe, DB, ...</b><small>normal requests</small></div>
+          </div>
+          <p class="verdict">Not a proxy. The value is placed in the program's environment, and the program talks to the service directly. The agent only sees redacted output.</p>
+        </div>
+        <div class="mode" role="listitem">
+          <header><b>AWS profiles</b><code>karambit aws prod -- ...</code></header>
+          <div class="flow">
+            <div class="node safe"><b>Agent</b><small>sends a command</small></div><div class="link"></div>
+            <div class="node"><b>Karambit</b><small>local key endpoint</small></div><div class="link"></div>
+            <div class="node sees"><b>AWS SDK / CLI</b><small>short-lived keys only</small></div><div class="link"></div>
+            <div class="node"><b>AWS</b><small>direct, unchanged</small></div>
+          </div>
+          <p class="verdict">Not a request proxy. Karambit only hands out temporary keys. Your long-term keys and SSO tokens never leave Karambit's memory. Details below.</p>
+        </div>
+        <div class="mode" role="listitem">
+          <header><b>Fixed tool call</b><code>karambit call ci-status JOB</code></header>
+          <div class="flow">
+            <div class="node safe"><b>Agent</b><small>names a tool</small></div><div class="link"></div>
+            <div class="node sees"><b>Karambit</b><small>makes the HTTPS call</small></div><div class="link"></div>
+            <div class="node"><b>CI server</b><small>fixed host + path</small></div>
+          </div>
+          <p class="verdict">A true proxy. The credential never leaves Karambit, not even to a child program. It's limited to built-in tools for now (CI build status). Widening this is the roadmap answer to "can it keep a copy".</p>
+        </div>
+      </div>
+      <div class="legend"><span class="l-safe">never holds the value</span><span class="l-sees">holds the value</span><span class="l-plain">passes it on or receives requests</span></div>
+    </div>
+  </section>
+
+  <!-- ===================== AWS ===================== -->
+  <section class="part" id="aws">
+    <div class="wrap">
+      <h2>"Won't AWS break if requests go through Karambit?"</h2>
+      <p class="intro">They don't go through Karambit. Karambit uses the credential mechanism every AWS SDK and the AWS CLI already support for containers: the SDK asks a local address for temporary keys, then talks to AWS by itself.</p>
+
+      <div class="chat">
+        <div class="msg prog"><div class="who"><svg><use href="#i-prog"/></svg></div><div class="bubble"><b class="name">aws s3 ls (the SDK inside it)</b><p>My environment says credentials are at <code>http://127.0.0.1:52811/…</code> with a token. Fetching.</p></div></div>
+        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>Token matches this run. Here are role keys from your SSO sign-in, valid until 14:05. Come back before then.</p></div></div>
+        <div class="msg prog"><div class="who"><svg><use href="#i-cloud"/></svg></div><div class="bubble"><b class="name">AWS</b><p>Signed request from the SDK, straight to me. Here's your bucket list. Nothing in between.</p></div></div>
+      </div>
+
+      <figure class="diagram">
+        <p class="swipe" aria-hidden="true">Diagram is wide: swipe sideways to see all of it →</p>
+        <div class="scroll" tabindex="0" aria-label="Diagram, scrolls sideways">
+        <svg viewBox="0 0 880 430" role="img" aria-labelledby="aws-t aws-d">
+          <title id="aws-t">AWS credential flow</title>
+          <desc id="aws-d">The AWS SDK in the program fetches temporary credentials from Karambit's per-run endpoint on 127.0.0.1, Karambit refreshes them from your SSO session, and all real AWS API calls go from the SDK directly to AWS.</desc>
+          <g text-anchor="middle">
+            <text x="100" y="30" class="lane-head">Program + AWS SDK</text><text x="100" y="48" class="lane-sub">aws, boto3, terraform...</text>
+            <text x="350" y="30" class="lane-head">Karambit endpoint</text><text x="350" y="48" class="lane-sub">127.0.0.1, this run only</text>
+            <text x="580" y="30" class="lane-head">AWS SSO / STS</text><text x="580" y="48" class="lane-sub">role credentials</text>
+            <text x="780" y="30" class="lane-head">AWS APIs</text><text x="780" y="48" class="lane-sub">S3, EC2, Lambda...</text>
+          </g>
+          <path d="M100 62V410M350 62V410M580 62V410M780 62V410" class="life"/>
+
+          <rect x="112" y="72" width="226" height="64" class="note"/>
+          <text x="124" y="92" class="lbl-mono">AWS_CONTAINER_CREDENTIALS_</text>
+          <text x="124" y="108" class="lbl-mono">  FULL_URI=http://127.0.0.1:…</text>
+          <text x="124" y="124" class="lbl-mono">AWS_CONTAINER_AUTH…TOKEN=…</text>
+
+          <path d="M100 164H344" class="arrow blue" marker-end="url(#ahb)"/>
+          <text x="112" y="156" class="lbl">GET credentials + token</text>
+
+          <path d="M350 196H574" class="arrow green" marker-end="url(#ahg)"/>
+          <text x="362" y="188" class="lbl">role keys from SSO session in RAM</text>
+          <path d="M580 222H356" class="arrow green" marker-end="url(#ahg)"/>
+          <text x="380" y="240" class="lbl dim">refreshed before they expire</text>
+
+          <path d="M350 270H106" class="arrow red" marker-end="url(#ahr)"/>
+          <text x="112" y="262" class="lbl-mono">{AccessKeyId, Secret…, Token, Expiration}</text>
+
+          <path d="M100 320H774" class="arrow" stroke-width="2.4" marker-end="url(#ah)"/>
+          <text x="112" y="312" class="lbl">every real API call: signed by the SDK, straight to AWS</text>
+          <path d="M780 350H106" class="arrow" stroke-width="2.4" marker-end="url(#ah)"/>
+          <text x="420" y="342" class="lbl">responses, streaming, retries: untouched</text>
+
+          <path d="M100 392H344" class="arrow blue" stroke-dasharray="5 4" marker-end="url(#ahb)"/>
+          <text x="112" y="384" class="lbl dim">before Expiration, the SDK simply asks again</text>
+        </svg>
+        </div>
+        <figcaption>The only extra hop is one local fetch per credential refresh. Karambit also hides <code>~/.aws</code> config and credentials from the program and clears leftover <code>AWS_*</code> variables, so it can't fall back to some other key.</figcaption>
+      </figure>
+
+      <div class="split">
+        <div class="blocked">
+          <h3 class="col"><svg width="16" height="16"><use href="#i-check"/></svg>Works like normal</h3>
+          <ul>
+            <li><svg><use href="#i-check"/></svg><span>AWS CLI, boto3, the Go/JS/Java SDKs, Terraform, kubectl</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Long jobs: SSO role keys are refreshed for the whole sign-in</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Uploads, streaming, paging, retries: requests aren't touched</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Signed out? The next fetch fails with a clear "sign in to &lt;portal&gt;" message</span></li>
+          </ul>
+        </div>
+        <div class="possible">
+          <h3 class="col"><svg width="16" height="16"><use href="#i-warn"/></svg>Can trip it up</h3>
+          <ul>
+            <li><svg><use href="#i-warn"/></svg><span>Tools that parse <code>~/.aws/credentials</code> themselves instead of using an SDK</span></li>
+            <li><svg><use href="#i-warn"/></svg><span>Very old SDKs without container-credential support</span></li>
+            <li><svg><use href="#i-warn"/></svg><span>Handing the job to a separate container without passing these two variables</span></li>
+            <li><svg><use href="#i-warn"/></svg><span>The temporary keys are visible to the program until they expire (15 min for pasted keys)</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== ENV ===================== -->
+  <section class="part" id="env">
+    <div class="wrap">
+      <h2>Your existing <code>.env</code> files</h2>
+      <p class="intro">Agents read <code>.env</code> files constantly, and paste them into prompts and commits. <code>karambit secure</code> (or <code>karambit eat</code>) moves them into the vault in one go, and <code>npm run dev</code> keeps working.</p>
+      <div class="steps">
+        <div class="step"><b>Preview</b><p><code>karambit secure --dry-run</code> lists variable names only, guesses which are secret, warns if the file was ever in git.</p></div>
+        <div class="step"><b>Store</b><p>One Touch ID. Each secret becomes <code>myapp/STRIPE_KEY</code>; the original file is archived whole.</p></div>
+        <div class="step"><b>Replace</b><p>A value-free <code>.env.schema</code> is written and trusted. The plaintext <code>.env</code> is deleted after the archive is verified.</p></div>
+        <div class="step"><b>Work as usual</b><p>Scripts get a <code>karambit run --</code> prefix. <code>karambit secure rebuild</code> puts the old files back exactly.</p></div>
+      </div>
+<pre class="code"><span class="c"># .env.schema: safe to commit, holds no secret values (varlock @env-spec format)</span>
+<span class="c"># ---</span>
+PORT=3000
+APP_URL=http://localhost:${PORT}
+<span class="c"># @sensitive</span>
+STRIPE_KEY=<span class="k">karambit(myapp/STRIPE_KEY)</span></pre>
+      <div class="chat">
+        <div class="msg agent"><div class="who"><svg><use href="#i-agent"/></svg></div><div class="bubble"><b class="name">Agent</b><p>Let me check the config. <code>cat .env.schema</code></p></div></div>
+        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>Read away: it's names, plain settings and references. The values are in the vault. And if you edit the schema to point at other secrets, I'll refuse it until your human trusts it again with Touch ID.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== FAQ ===================== -->
+  <section class="part" id="faq">
+    <div class="wrap">
+      <h2>More questions people ask</h2>
+      <details class="faq"><summary>Can't the agent just pretend to be me?</summary><div><p>Detection reads the process tree and environment markers from the kernel, never from what the caller says. A process that double-forks and scrubs its environment can look human; that's documented. The hard backstop is Touch ID: <i>Only me</i> and <i>Touch ID</i> secrets need a physical fingerprint, enforced by the Secure Enclave, not by Karambit's code.</p></div></details>
+      <details class="faq"><summary>Why not just use the macOS Keychain?</summary><div><p>Keychain items are protected in software by your login password, and access rules depend on code signatures that change on every rebuild. Karambit's keys are hardware-bound in the Secure Enclave, with a separate key per access level. Keychain would add a second copy, not more protection.</p></div></details>
+      <details class="faq"><summary>What about the clipboard?</summary><div><p>Copy is a human action. The value is marked as concealed and cleared after a short timer, but any program running as you can read the clipboard until then.</p></div></details>
+      <details class="faq"><summary>Are unlocked secrets protected in RAM?</summary><div><p>They live only in the daemon's memory, and macOS refuses same-user debugger attach to it. Locking that memory against swap, disabling core dumps and denying attach outright are not done yet; they're next on the hardening list.</p></div></details>
+      <details class="faq"><summary>Does it work on Linux or Windows?</summary><div><p>The core builds on Linux, but the security parts (hardware keys, caller identity, bound launch) are macOS only today. Elsewhere Karambit refuses rather than pretending.</p></div></details>
+      <details class="faq"><summary>Is varlock involved?</summary><div><p>Karambit reads the same <code>.env.schema</code> format as varlock (@env-spec), ported to Rust from their MIT-licensed parser and tested against it (48 of 48 parse cases match). Varlock's plugin functions like <code>op()</code> or <code>exec()</code> are refused, so a schema never runs a command. Credit and license: <code>THIRD_PARTY_NOTICES.md</code>.</p></div></details>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">Karambit: local-first, agent-aware secrets for macOS. Full threat model and every limit: <code>docs/threat-model.md</code>.</div>
+</footer>
+</body>
+</html>
