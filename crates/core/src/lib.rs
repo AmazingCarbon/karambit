@@ -951,11 +951,9 @@ impl Karambit {
                 store::require_generic_name(n)?;
                 if n.starts_with("aws/") || n == "aws" { bail!("AWS profiles can't be renamed; add the profile again under the new name"); }
             }
+            // x.json and the folder x/ are separate paths (as with `add`), so only an exact
+            // name clashes; moving test/a to test/a/b is allowed.
             if all.iter().any(|o| &o.name == new) { bail!("{new} already exists"); }
-            // A secret file and a folder can't share a path (x.json vs x/).
-            if all.iter().any(|o| o.name.starts_with(&format!("{new}/")) || new.starts_with(&format!("{}/", o.name))) {
-                bail!("{new} clashes with an existing secret or folder");
-            }
         }
         Ok(plan)
     }
@@ -2772,6 +2770,27 @@ mod proof_tests {
     }
 
     #[test]
+    fn rename_into_a_folder_named_like_the_secret_itself() {
+        let _dispatch = RecoveryDispatch::install();
+        let v = fixture("rename-under-self");
+        secret(&v, "test/me", Tier::Open, true);
+        secret(&v, "test/other", Tier::Open, true);
+        auth(true);
+        soft_ecdh();
+        v.rename("test/me", "test/me/inner").unwrap();
+        assert!(!v.paths.secret("test/me").unwrap().exists());
+        assert_eq!(rename_value(&v, "test/me/inner"), b"synthetic proof fixture");
+        // A secret may sit beside a folder of the same name, as `add` allows.
+        auth(true);
+        soft_ecdh();
+        v.rename("test/other", "test/me").unwrap();
+        assert!(v.paths.secret("test/me").unwrap().exists() && v.paths.secret("test/me/inner").unwrap().exists());
+        platform::helper::ECDH_HOOK.with(|h| h.borrow_mut().take());
+        platform::helper::AUTH_HOOK.with(|h| h.borrow_mut().take());
+        fs::remove_dir_all(v.paths.root).unwrap();
+    }
+
+    #[test]
     fn folder_move_renames_every_item_under_one_prompt() {
         let _dispatch = RecoveryDispatch::install();
         let v = fixture("rename-folder");
@@ -2802,8 +2821,7 @@ mod proof_tests {
         soft_ecdh();
         for (from, to, want) in [
             ("test/a", "test/b", "already exists"),
-            ("test/a", "dir", "clashes"),
-            ("test/a", "dir/x/deeper", "clashes"),
+            ("test/a", "dir/x", "already exists"),
             ("test/a", "test/a", "the same"),
             ("test/", "test/inner/", "into itself"),
             ("test/a", "other/", "folder (ending in /)"),
