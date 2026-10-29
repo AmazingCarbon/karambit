@@ -166,6 +166,8 @@ pub enum Req {
     Add { name: String, value: String, tier: Option<crate::Tier>, agent_allowed: bool, public: bool, overwrite: bool },
     ChangePolicy { patterns: Vec<String>, tier: Option<crate::Tier>, agent_allowed: Option<bool>, public: Option<bool> },
     Delete { patterns: Vec<String> },
+    /// Rename a secret, or move a folder when both end in `/`.
+    Rename { from: String, to: String },
     ChangeConfig { key: String, value: String },
     UpgradeKeys,
     Recover { #[serde(serialize_with = "serialize_paper", deserialize_with = "deserialize_paper")] identity_text: Zeroizing<String> },
@@ -1500,6 +1502,7 @@ fn handle_as_scoped(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port:
         Req::Add { .. } => Some("daemon-add"),
         Req::ChangePolicy { .. } => Some("daemon-policy"),
         Req::Delete { .. } => Some("daemon-delete"),
+        Req::Rename { .. } => Some("daemon-rename"),
         Req::ChangeConfig { .. } => Some("daemon-config"),
         Req::Recover { .. } => Some("daemon-recover"),
         Req::RecoverFromPaper { .. } => Some("daemon-recover-from-paper"),
@@ -1539,6 +1542,7 @@ fn handle_as_scoped(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port:
         Req::SsoImport { items, .. } => items.iter().map(|i| format!("aws/{}", i.name)).collect(),
         Req::SourceAdd { name, .. } | Req::SourceRemove { name } | Req::SourceRetarget { name, .. }
         | Req::Add { name, .. } | Req::Copy { name } => vec![name.clone()],
+        Req::Rename { from, to } => vec![from.clone(), to.clone()],
         Req::ChangePolicy { patterns, .. } | Req::Delete { patterns } => patterns.clone(),
         Req::Grant { leases } => leases.iter().map(|l| l.name.clone()).collect(),
         Req::Unlock { names, .. } | Req::Use { names, .. } | Req::HumanUnlock { names } | Req::GrantLease { names, .. } => names.clone(),
@@ -3085,6 +3089,11 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
         Req::Delete { patterns } => {
             let v = peer_vault(p, &peer)?;
             Ok(serde_json::to_value(v.remove_internal(&patterns,
+                |req| handle_as(p, st, peer.clone(), req, http_port, None, Ok))?)?)
+        }
+        Req::Rename { from, to } => {
+            let v = peer_vault(p, &peer)?;
+            Ok(serde_json::to_value(v.rename_internal(&from, &to,
                 |req| handle_as(p, st, peer.clone(), req, http_port, None, Ok))?)?)
         }
         Req::ChangeConfig { key, value } => {
@@ -6744,6 +6753,7 @@ mod capability_fence_tests {
             (Verb::Add, Req::Add { name: "test/new".into(), value: B64.encode(b"synthetic"), tier: Some(Tier::Bio), agent_allowed: false, public: false, overwrite: false }),
             (Verb::Add, Req::Add { name: "test/agentok".into(), value: B64.encode(b"synthetic"), tier: Some(Tier::Bio), agent_allowed: false, public: false, overwrite: true }),
             (Verb::Rm, Req::Delete { patterns: vec!["test/bio".into()] }),
+            (Verb::Rename, Req::Rename { from: "test/bio".into(), to: "test/moved".into() }),
             (Verb::PolicyRelax, Req::ChangePolicy { patterns: vec!["test/bio".into()], tier: Some(Tier::Open), agent_allowed: Some(true), public: None }),
             (Verb::ConfigRelax, Req::ChangeConfig { key: "default-tier".into(), value: "off".into() }),
             (Verb::ConfigRelax, Req::ChangeConfig { key: "agent-process-names".into(), value: "".into() }),

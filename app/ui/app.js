@@ -571,6 +571,7 @@ function folderRow(path, items, matches) {
       el("button", { class: "btn", textContent: "Open", onclick: () => navigateFolder(path) }),
       el("button", { class: "btn", textContent: "New secret here", onclick: () => openAdd(path) }),
       el("button", { class: "btn", textContent: "Temporary access for folder…", onclick: () => openFolderDetail(path) }),
+      ...(path === "aws" || path.startsWith("aws/") || path === "sources" || path.startsWith("sources/") ? [] : [el("button", { class: "btn", textContent: "Rename or move…", onclick: () => openMoveFolder(path, items) })]),
       el("button", { class: "btn danger-text", textContent: "Delete folder…", onclick: () => deleteFolder(path, items) })));
   menu.addEventListener("toggle", () => {
     if (!menu.open) return;
@@ -922,7 +923,7 @@ function whoLabel(ev) {
 }
 
 const ACTION_LABEL = {
-  run: "Used", get: "Revealed", copy: "Copied", view: "Viewed (public)", add: "Saved", policy: "Access changed", rm: "Deleted",
+  run: "Used", get: "Revealed", copy: "Copied", view: "Viewed (public)", add: "Saved", policy: "Access changed", rm: "Deleted", rename: "Renamed",
   lease: "Temporary access given", revoke: "Temporary access ended", "lease-ended": "Temporary access ended (access changed)",
   "lease-used-up": "Temporary access used up", "lease-expired": "Temporary access expired", "aws-describe": "AWS profile details read",
   "backup-rotate": "Backup re-made", recover: "Recovered", config: "Settings changed", init: "Set up", "keys-upgrade": "Agent key added",
@@ -2707,9 +2708,8 @@ function setAddMode(s) {
   editing = s;
   $("add-title").textContent = s ? `Edit ${s.name}` : "New secret";
   $("add-hint").textContent = s
-    ? "Leave the value empty to keep it. A new value replaces the old one, asks for Touch ID and ends any temporary access."
+    ? "Leave the value empty to keep it. A new name or value asks for Touch ID and ends any temporary access. Scripts that use the old name stop working."
     : "Name it folder/name. A new folder appears when you save.";
-  $("add-name").readOnly = !!s;
   $("add-value").required = !s;
   $("add-value").placeholder = s ? "Keep the current value" : "";
   $("add-force-row").hidden = !!s;
@@ -2777,6 +2777,7 @@ async function submitAdd(ev) {
 
 async function submitEdit(s, level, flags) {
   const value = $("add-value").value;
+  const name = $("add-name").value.trim();
   setFormError("add-error", "");
   if (flags.public !== !!s.public) {
     const ok = await confirmDialog(flags.public ? `Make ${s.name} public?` : `Make ${s.name} secret?`, [
@@ -2785,22 +2786,61 @@ async function submitEdit(s, level, flags) {
     ], flags.public ? "Make public" : "Make secret", false);
     if (!ok) return;
   }
+  const renamed = name !== s.name;
+  if (!renamed && !value && level === accessOf(s)) { $("add-dialog").close(); return; }
+  let target = s.name;
   try {
+    // Rename first (keeps value and access), then apply the other changes to the new name.
+    if (renamed) {
+      await call("rename", { from: s.name, to: name }, $("add-submit"));
+      target = name;
+      if (selectedSecret === s.name) selectedSecret = name;
+      editing = { ...s, name };
+      $("add-title").textContent = `Edit ${name}`;
+    }
     if (value) {
       // Same backend path as "Overwrite if it exists": Touch ID, new key, leases end.
-      await call("add", { name: s.name, value, ...flags, overwrite: true }, $("add-submit"));
+      await call("add", { name: target, value, ...flags, overwrite: true }, $("add-submit"));
     } else if (level !== accessOf(s)) {
-      await call("set_policy", { names: [s.name], ...flags }, $("add-submit"));
-    } else {
-      $("add-dialog").close();
-      return;
+      await call("set_policy", { names: [target], ...flags }, $("add-submit"));
     }
     $("add-value").value = "";
     $("add-dialog").close();
-    toast(value ? `Updated ${s.name}` : `${s.name}: ${accessLevel(level).label}`);
+    toast(renamed ? `Renamed ${s.name} to ${target}` : value ? `Updated ${target}` : `${target}: ${accessLevel(level).label}`);
     loadSecrets();
   } catch (err) {
-    setFormError("add-error", String(err)); // toast shown too; keep dialog open
+    // A rename that worked stays done; the dialog now edits the new name.
+    setFormError("add-error", target !== s.name ? `Renamed to ${target}, but: ${err}` : String(err));
+    loadSecrets();
+  }
+}
+
+// Move a folder: every secret under path/ gets the new prefix, one Touch ID.
+let movingFolder = null;
+function openMoveFolder(path, items) {
+  movingFolder = { path, count: items.length };
+  $("move-form").reset();
+  $("move-name").value = path;
+  $("move-hint").textContent = `Moves all ${items.length} items in ${path}/ and keeps their values and access. Asks for Touch ID once and ends temporary access on them. Scripts that use the old names stop working.`;
+  setFormError("move-error", "");
+  openDialog($("move-dialog"));
+  $("move-name").select();
+}
+async function submitMoveFolder(ev) {
+  ev.preventDefault();
+  const to = $("move-name").value.trim().replace(/\/+$/, "");
+  const { path } = movingFolder;
+  if (to === path) { $("move-dialog").close(); return; }
+  setFormError("move-error", "");
+  try {
+    await call("rename", { from: path + "/", to: to + "/" }, $("move-submit"));
+    $("move-dialog").close();
+    toast(`Moved ${path}/ to ${to}/`);
+    if (currentFolder === path || currentFolder.startsWith(path + "/")) currentFolder = to + currentFolder.slice(path.length);
+    if (selectedSecret?.startsWith(path + "/")) selectedSecret = to + selectedSecret.slice(path.length);
+    loadSecrets();
+  } catch (err) {
+    setFormError("move-error", String(err));
   }
 }
 
@@ -3049,6 +3089,9 @@ accessPicker($("aws-access"), "aws-level", levelsFor(true));
 $("add-cancel").addEventListener("click", () => $("add-dialog").close());
 $("add-dialog").addEventListener("close", () => ($("add-value").value = ""));
 $("add-form").addEventListener("submit", submitAdd);
+$("move-form").addEventListener("submit", submitMoveFolder);
+$("move-cancel").addEventListener("click", () => $("move-dialog").close());
+$("move-form").addEventListener("input", () => setFormError("move-error", ""));
 $("add-form").addEventListener("input", () => setFormError("add-error", ""));
 $("aws-form").addEventListener("input", () => setFormError("aws-error", ""));
 $("portal-form").addEventListener("input", () => setFormError("portal-error", ""));

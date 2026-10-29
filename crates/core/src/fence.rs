@@ -23,6 +23,8 @@ pub enum Verb {
     Add,
     /// Delete secrets (`rm`, `aws rm`).
     Rm,
+    /// Rename a secret or move a folder (`mv`).
+    Rename,
     /// Relax policy: Touch ID off, agents allowed, public on.
     PolicyRelax,
     /// Relax config: default tier off, backup recipient none, `agent-*`, longer self-lease.
@@ -77,8 +79,8 @@ pub enum Verb {
 
 impl Verb {
     /// Every verb, for table-driven tests. `Revive` must stay the last variant.
-    pub const ALL: [Verb; 32] = [
-        Verb::Init, Verb::Add, Verb::Rm, Verb::PolicyRelax, Verb::ConfigRelax, Verb::Get, Verb::LeaseGrant,
+    pub const ALL: [Verb; 33] = [
+        Verb::Init, Verb::Add, Verb::Rm, Verb::Rename, Verb::PolicyRelax, Verb::ConfigRelax, Verb::Get, Verb::LeaseGrant,
         Verb::HumanUnlock, Verb::KeysUpgrade, Verb::HelperPin, Verb::Recover, Verb::RetireKeys, Verb::BackupRotate,
         Verb::BackupVerify, Verb::PaperBackup, Verb::NoRedact, Verb::DaemonStop, Verb::SsoLogin, Verb::SsoLogout,
         Verb::SsoPortalAdd, Verb::SsoPortalRemove, Verb::SsoPortalLimit, Verb::SsoRegister, Verb::SsoDiscover, Verb::SsoImport,
@@ -119,6 +121,7 @@ pub const AGENT_DENIED_VERBS: &[Row] = &[
     row(Verb::Init, "initializing the vault", true, true),
     row(Verb::Add, "adding a secret", true, true),
     row(Verb::Rm, "removing a secret", true, true),
+    row(Verb::Rename, "renaming a secret", true, true),
     row(Verb::PolicyRelax, "relaxing policy", true, true),
     row(Verb::ConfigRelax, "relaxing config", true, true),
     // Daemon unlock is policy-governed: an agent_allowed secret still needs fresh approval.
@@ -172,6 +175,7 @@ pub(crate) fn request_verb(req: &Req) -> Option<Verb> {
         Req::Init { .. } => Some(Verb::Init),
         Req::Add { .. } => Some(Verb::Add),
         Req::Delete { .. } => Some(Verb::Rm),
+        Req::Rename { .. } => Some(Verb::Rename),
         Req::UpgradeKeys => Some(Verb::KeysUpgrade),
         Req::HelperPin { .. } => Some(Verb::HelperPin),
         Req::Recover { .. } | Req::RecoverFromPaper { .. } => Some(Verb::Recover),

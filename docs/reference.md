@@ -11,6 +11,7 @@ A `run` that is refused or fails before the command starts exits 125 with a reas
 as `{"error":{...}}`. `run --status-fd N` writes one status line the command can't forge;
 `"started":true` means the command was exec'd, so a launcher failure (exit 125, `launch_failed`) is `started:false`.
 JSON output is compact unless stdout is a terminal or `--pretty` is given.
+`mv` never replaces an existing secret, refuses `aws/*` and `sources/*`, and ends temporary access on the old names; scripts and profiles that use an old name must be updated.
 `ls --brief` prints `name<TAB>access`. `call --list` shows the configured fixed tools.
 The old `--touch`, `--agent`, `--human-only` and `--public` flags still work.
 
@@ -27,6 +28,8 @@ karambit get stripe/prod-key                     # human-only: clipboard, auto-c
 karambit policy 'dev/*' --access agents          # relaxing is human-only + Touch ID
 karambit policy bank/pin --access me-touch       # tightening is always allowed
 karambit add ci/email --access public       # not a secret: agents can read it, never redacted
+karambit mv stripe/prod-key payments/stripe      # rename: keeps value and access; human + Touch ID
+karambit mv stripe/ vendors/stripe/              # move a folder (both end in /); one Touch ID
 karambit policy ci/url --access public      # promote an existing entry to public (human + Touch ID)
 karambit config default-tier off
 karambit audit ; karambit audit --verify          # reads across rotated audit-<time>.jsonl segments
