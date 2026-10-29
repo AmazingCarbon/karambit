@@ -765,11 +765,13 @@ fieldset.seg input:checked + span { background: var(--accent); color: var(--on-a
   .audit-meta .audit-hint { text-align: left; }
   .sso-main { flex-wrap: wrap; }
 }
-.lease-sentence { font-size: 19px; line-height: 2.4; gap: 8px 12px; margin: 24px 0; }
-.lease-sentence select { font-size: 16px; background: var(--muted-bg); max-width: 300px; }
-.lease-sentence strong { font-size: 16px; overflow-wrap: anywhere; }
-.lease-sentence input:not([type=checkbox]) { width: 300px; font-size: 14px; }
-.lease-help { margin-top: 24px; line-height: 1.6; }
+.lease-sentence { font-size: 16px; line-height: 1.6; gap: 10px 14px; margin: 20px 0; }
+.lease-pair { display: inline-flex; align-items: center; gap: 8px; flex: none; max-width: 100%; white-space: nowrap; }
+.lease-pair-fill { flex: 1 1 280px; min-width: 0; }
+.lease-sentence select { font-size: 16px; background: var(--muted-bg); max-width: 260px; }
+.lease-sentence strong { font-size: 16px; overflow-wrap: anywhere; white-space: normal; }
+.lease-sentence input:not([type=checkbox]) { flex: 1 1 180px; width: auto; min-width: 180px; max-width: 100%; font-size: 14px; }
+.lease-help { margin-top: 16px; line-height: 1.6; }
 #lease-active-sub { margin: 8px 0; }
 
 /* Fixed shell; each column owns its scroll, not the document. */
@@ -805,6 +807,8 @@ button.level-badge { border: 0; font-family: inherit; cursor: pointer; }
 dialog h2 { padding-right: 28px; }
 #palette-dialog > input { width: calc(100% - 40px); }
 .step-back { margin-bottom: 12px; }
+/* Back sits top-left on the title row (float: the title flows beside it), ✕ top-right. */
+.dialog-back, #add-back { float: left; margin: -2px 12px -6px 0; }
 .access-segments { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line-2); }
 .access-step { position: relative; display: block; cursor: pointer; }
 .access-step input { position: absolute; opacity: 0; width: 1px; height: 1px; }
@@ -885,11 +889,11 @@ main:has(#view-aws:not([hidden])), main:has(#view-secrets:not([hidden])) { paddi
 .panel-footer .hint { font-size: 12px; margin: 0; }
 .panel-footer .btn { padding: 0; border: 0; }
 .panel-value code { flex: 1; padding: 8px 12px; background: var(--muted-bg); color: var(--fg-2); }
-.inspector .access-segments { display: flex; flex-direction: column; border: 0; background: var(--muted-bg); }
-.inspector .access-step > span { justify-content: flex-start; padding: 12px; font-size: 14px; gap: 12px; }
-.inspector .access-step + .access-step { border: 0; border-top: 1px solid var(--line); }
-.inspector .access-step input:checked + span { background: var(--accent-soft); color: var(--fg); }
-.inspector .access-step input:checked + span svg { color: var(--lvl); }
+.inspector .access-segments, #add-access .access-segments { display: flex; flex-direction: column; border: 0; background: var(--muted-bg); }
+.inspector .access-step > span, #add-access .access-step > span { justify-content: flex-start; padding: 12px; font-size: 14px; gap: 12px; }
+.inspector .access-step + .access-step, #add-access .access-step + .access-step { border: 0; border-top: 1px solid var(--line); }
+.inspector .access-step input:checked + span, #add-access .access-step input:checked + span { background: var(--accent-soft); color: var(--fg); }
+.inspector .access-step input:checked + span svg, #add-access .access-step input:checked + span svg { color: var(--lvl); }
 .access-label { flex: 1; }
 .access-label b { font-weight: 600; }
 .access-label small { display: none; font-size: 12.5px; color: var(--fg-2); margin-top: 3px; }
@@ -946,8 +950,12 @@ input:checked + span .access-radio { border-color: var(--accent); background: va
 .panel-lease { padding: 12px 14px; background: var(--muted-bg); }
 .panel-lease p { margin: 0 0 8px; }
 .panel-lease .btn { border: 0; margin-right: 6px; }
-.inspector .access-step > span { color: var(--fg); align-items: flex-start; }
-.inspector .access-step svg, .access-radio { margin-top: 3px; }
+.inspector .access-step > span, #add-access .access-step > span { color: var(--fg); align-items: flex-start; }
+.inspector .access-step svg, #add-access .access-step svg, .access-radio { margin-top: 3px; }
+/* Public is the last row of the same box: same padding, background and divider as the levels. */
+.inspector .compact-access > .access-step > span, #add-access > .access-step > span { padding: 12px; font-size: 14px; gap: 12px; color: var(--fg); background: var(--muted-bg); border-top: 1px solid var(--line); }
+.inspector .compact-access > .access-step input:checked + span, #add-access > .access-step input:checked + span { padding: 12px; color: var(--fg); background: var(--accent-soft); }
+#add-access { margin-top: 6px; }
 
 /* Compact Secrets header — row 1 title + actions, row 2 filter + chips. */
 #view-secrets > .page-head { order: 0; }
@@ -1093,6 +1101,7 @@ h2.lbl { font-family: var(--font-pixel); text-transform: uppercase; font-size: 1
 .disc { background: var(--surface); }
 .disc > summary { display: flex; align-items: center; gap: 8px; padding: 12px 16px; color: var(--fg-2); font-size: 13.5px; font-weight: 600; cursor: pointer; list-style: none; }
 .disc > summary::-webkit-details-marker { display: none; }
+.disc > summary .hint { margin: 0; font-weight: 400; } /* inline note: no block margin, same line as the label */
 .disc > summary::before { content: "›"; display: inline-block; transition: transform var(--t-fast); }
 .disc[open] > summary::before { transform: rotate(90deg); }
 .disc > .row { border-top: 1px solid var(--line); }

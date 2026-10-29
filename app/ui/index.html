@@ -299,8 +299,8 @@
   <!-- Add dialog -->
   <dialog id="add-dialog" aria-labelledby="add-title">
     <form id="add-form" method="dialog">
-      <button type="button" id="add-back" class="btn sm step-back" hidden>← Back</button>
-      <h2 id="add-title">New secret</h2><p class="hint">Name it folder/name. A new folder appears when you save.</p>
+      <button type="button" id="add-back" class="btn sm step-back" data-own-back hidden>← Back</button>
+      <h2 id="add-title">New secret</h2><p id="add-hint" class="hint">Name it folder/name. A new folder appears when you save.</p>
       <label class="lbl" for="add-name">Name</label>
       <input id="add-name" required autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*(/[A-Za-z0-9_\-][A-Za-z0-9._\-]*)*" placeholder="folder/name">
       <label class="lbl" for="add-value">Value</label>
@@ -308,10 +308,10 @@
 
       <fieldset class="access-pick">
         <legend class="lbl">Access</legend>
-        <div id="add-access" class="opts"></div>
+        <div id="add-access" class="compact-access"></div>
       </fieldset>
       <div class="opts">
-        <label class="row">
+        <label class="row" id="add-force-row">
           <span class="row-text"><b>Overwrite if it exists</b></span>
           <span class="sw"><input type="checkbox" id="add-force"><span class="track" aria-hidden="true"></span></span>
         </label>
@@ -359,24 +359,23 @@
       </div>
       <div id="lease-form">
         <div class="lease-controls lease-sentence">
-          <span>Let</span><label class="sr-only" for="lease-to">Agent or session</label><select id="lease-to"></select>
-          <span>use</span><strong id="lease-target-name" class="mono"></strong>
-          <span>for</span><label class="sr-only" for="lease-hours">Duration</label><select id="lease-hours">
+          <span class="lease-pair"><span>Let</span><label class="sr-only" for="lease-to">Agent or session</label><select id="lease-to"></select></span>
+          <span class="lease-pair"><span>use</span><strong id="lease-target-name" class="mono"></strong></span>
+          <span class="lease-pair"><span>for</span><label class="sr-only" for="lease-hours">Duration</label><select id="lease-hours">
             <option value="1">1 hour</option><option value="2" selected>2 hours</option><option value="3">3 hours</option><option value="8">8 hours</option><option value="24">24 hours</option><option value="72">3 days</option>
-          </select>
-          <label for="lease-cwd">only in</label><input id="lease-cwd" autocomplete="off" spellcheck="false" placeholder="Any folder (or absolute path)">
+          </select></span>
+          <span class="lease-pair lease-pair-fill"><label for="lease-cwd">only in</label><input id="lease-cwd" autocomplete="off" spellcheck="false" placeholder="Any folder (or absolute path)"></span>
         </div>
         <details class="lease-limits">
           <summary>More limits: programs, number of uses</summary>
-          <button type="button" class="btn sm step-back">← Back</button>
           <div class="limit-grid"><label for="lease-cmds">Only for programs</label><input id="lease-cmds" autocomplete="off" spellcheck="false" placeholder="Absolute paths, comma-separated">
           <label for="lease-uses">Max uses per secret</label><input id="lease-uses" type="number" min="1" max="10000" placeholder="unlimited"></div>
           <p class="hint">Program paths are pinned at grant time. Shells are refused for program-scoped access.</p>
         </details>
         <p id="lease-help" class="banner warn lease-help"></p>
-        <p class="hint">Ends early on revocation, relevant access or value changes, deletion, or daemon restart. Agent access does not end on screen lock.</p>
+        <p class="hint"><span id="lease-touch-note">Touch ID is asked once to confirm. </span>Ends early on revocation, relevant access or value changes, deletion, or daemon restart. Agent access does not end on screen lock.</p>
         <button type="button" class="btn lease-require-touch" id="lease-require-touch" hidden>Require Touch ID instead</button>
-        <div class="actions"><span class="muted small">Touch ID is asked once to confirm.</span><button type="button" class="btn primary" id="lease-grant">Give access</button></div>
+        <div class="actions"><button type="button" class="btn primary" id="lease-grant">Give access</button></div>
       </div>
 
       <h3 class="sec">Recent activity</h3>

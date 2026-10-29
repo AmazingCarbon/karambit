@@ -1049,15 +1049,23 @@ async function renderDetail() {
   syncDetailPrimary();
   $("lease-grant").textContent = leased.length ? (isFolder ? "Give all again" : "Replace temporary access") : isFolder ? `Give access to all ${leasable.length}` : "Give access";
   const cli = isFolder && leased.length ? ` Replaces ${leased.length} existing grants and resets their use counts.` : "";
-  $("lease-help").textContent = leasable.length === 0
+  // The banner is only for a real warning or an explanation of why there is no form. The normal
+  // Touch ID entry is covered by the sentence above plus the grey hint below, so it stays empty.
+  const help = leasable.length === 0
     ? "Public entries are always available to agents; there's nothing to give."
     : isFolder
       ? `Lets the chosen agent use all ${leasable.length} non-public items in ${d.name}/ without Touch ID until it ends, including ones that normally refuse agents. Covers what's in the folder now, not items added later. One Touch ID approves it.${cli}`
       : !items[0].agent_allowed
         ? `This normally refuses agents. Temporary access lets the chosen agent use it anyway, without Touch ID, until it ends. Giving it asks for Touch ID once.${cli}`
         : items[0].tier === "bio"
-          ? `Lets the chosen agent use this without a Touch ID prompt until it ends. Giving it asks for Touch ID once.${cli}`
+          ? ""
           : `Agents can already use this without a prompt. Temporary access only records who it's for and until when; ending it doesn't block agents.${cli}`;
+  $("lease-help").textContent = help;
+  $("lease-help").hidden = help === "";
+  $("lease-touch-note").hidden = controls.hidden || help !== ""; // warnings above already say Touch ID is asked once
+  // Touch ID entry with agents allowed: no warning banner, but keep what the grant does as a grey hint.
+  const bioAgents = !isFolder && leasable.length > 0 && items[0].agent_allowed && items[0].tier === "bio";
+  $("lease-touch-note").textContent = `${bioAgents ? "Lets the chosen agent use this without a Touch ID prompt until it ends. " : ""}Touch ID is asked once to confirm. `;
 
   // Activity: per secret, or merged across the folder.
   const names = isFolder ? items.map((s) => s.name) : [d.name];
@@ -2623,12 +2631,8 @@ function syncAccessHint(box) {
   const hint = box.querySelector(".access-hint");
   if (hint) hint.textContent = COMPACT_ACCESS_HINT[id || "me"];
 }
-function policyPicker(s) {
-  const box = el("div", { class: "compact-access", role: "radiogroup", "aria-label": "Who can use it" });
-  accessPicker(box, `policy-${++accessHintSeq}`, levelsFor(isAws(s.name)));
-  const selected = box.querySelector(`input[value="${accessOf(s)}"]`);
-  if (selected) selected.checked = true;
-  syncAccessHint(box);
+// Radio + glyph + label rows; only the selected row shows its one-line explanation.
+function compactAccessRows(box) {
   box.querySelectorAll(".access-step").forEach((step) => {
     const input = step.querySelector("input"), span = step.querySelector("span");
     const label = input.value === "public" ? "Mark as public…" : accessLevel(input.value).label;
@@ -2636,6 +2640,14 @@ function policyPicker(s) {
     span.replaceChildren(el("i", { class: "access-radio", "aria-hidden": "true" }), glyph, el("span", { class: "access-label" }, el("b", { textContent: label }), el("small", { class: "access-explain", textContent: COMPACT_ACCESS_HINT[input.value] })));
   });
   box.querySelector(".access-hint")?.remove(); // the selected option carries its own one-line explanation
+}
+function policyPicker(s) {
+  const box = el("div", { class: "compact-access", role: "radiogroup", "aria-label": "Who can use it" });
+  accessPicker(box, `policy-${++accessHintSeq}`, levelsFor(isAws(s.name)));
+  const selected = box.querySelector(`input[value="${accessOf(s)}"]`);
+  if (selected) selected.checked = true;
+  syncAccessHint(box);
+  compactAccessRows(box);
   const status = el("p", { class: "access-status small", role: "status", textContent: accessBusy.get(s.name) || accessError.get(s.name)?.text || "" });
   box.append(status);
   box.querySelectorAll("input").forEach((n) => { n.disabled = accessBusy.has(s.name); });
@@ -2689,7 +2701,36 @@ function setFormError(id, text) {
   $(id).textContent = text;
 }
 
+// The Add dialog also edits: name locked, value optional (empty keeps it), access prefilled.
+let editing = null; // the secret being edited, or null for a new secret
+function setAddMode(s) {
+  editing = s;
+  $("add-title").textContent = s ? `Edit ${s.name}` : "New secret";
+  $("add-hint").textContent = s
+    ? "Leave the value empty to keep it. A new value replaces the old one, asks for Touch ID and ends any temporary access."
+    : "Name it folder/name. A new folder appears when you save.";
+  $("add-name").readOnly = !!s;
+  $("add-value").required = !s;
+  $("add-value").placeholder = s ? "Keep the current value" : "";
+  $("add-force-row").hidden = !!s;
+}
+function openEdit(s) {
+  setAddMode(s);
+  $("add-back").hidden = true;
+  $("add-form").reset();
+  $("add-name").value = s.name;
+  $("add-form").querySelectorAll("input.touched").forEach((n) => n.classList.remove("touched"));
+  setFormError("add-error", "");
+  // A retired "Only me" level has no radio: nothing is checked, so the owner must pick a new one.
+  const current = $("add-access").querySelector(`input[value="${accessOf(s)}"]`);
+  if (current) current.checked = true;
+  syncAccessHint($("add-access"));
+  openDialog($("add-dialog"));
+  $("add-value").focus();
+}
+
 function openAdd(folder = currentFolder, fromFolder = false) {
+  setAddMode(null);
   $("add-back").hidden = !fromFolder;
   if (typeof folder !== "string") folder = currentFolder;
   $("add-form").reset();
@@ -2710,7 +2751,10 @@ $("add-form").addEventListener("invalid", (e) => e.target.classList.add("touched
 
 async function submitAdd(ev) {
   ev.preventDefault();
-  const flags = levelFlags($("add-form").elements["add-level"].value);
+  const level = $("add-access").querySelector('input[value="public"]:checked') ? "public" : $("add-form").elements["add-level"].value;
+  if (!level) { setFormError("add-error", "Choose who can use it."); return; }
+  const flags = levelFlags(level);
+  if (editing) { await submitEdit(editing, level, flags); return; }
   const args = {
     name: $("add-name").value.trim(),
     value: $("add-value").value,
@@ -2725,6 +2769,35 @@ async function submitAdd(ev) {
     $("add-value").value = "";
     $("add-dialog").close();
     toast(`Saved ${args.name}`);
+    loadSecrets();
+  } catch (err) {
+    setFormError("add-error", String(err)); // toast shown too; keep dialog open
+  }
+}
+
+async function submitEdit(s, level, flags) {
+  const value = $("add-value").value;
+  setFormError("add-error", "");
+  if (flags.public !== !!s.public) {
+    const ok = await confirmDialog(flags.public ? `Make ${s.name} public?` : `Make ${s.name} secret?`, [
+      flags.public ? `Agents will be able to read ${s.name} and it won't be redacted. Use this only for identifiers like emails and URLs.`
+        : `${s.name} will be hidden from agents and redacted again.`,
+    ], flags.public ? "Make public" : "Make secret", false);
+    if (!ok) return;
+  }
+  try {
+    if (value) {
+      // Same backend path as "Overwrite if it exists": Touch ID, new key, leases end.
+      await call("add", { name: s.name, value, ...flags, overwrite: true }, $("add-submit"));
+    } else if (level !== accessOf(s)) {
+      await call("set_policy", { names: [s.name], ...flags }, $("add-submit"));
+    } else {
+      $("add-dialog").close();
+      return;
+    }
+    $("add-value").value = "";
+    $("add-dialog").close();
+    toast(value ? `Updated ${s.name}` : `${s.name}: ${accessLevel(level).label}`);
     loadSecrets();
   } catch (err) {
     setFormError("add-error", String(err)); // toast shown too; keep dialog open
@@ -2751,8 +2824,9 @@ function renderInspector() {
   if (isAws(s.name)) { panel.append(aws); renderAwsDetail(s); }
   else {
     const copy = el("button", { class: "btn primary", textContent: "Copy", onclick: () => copyValue(s.name, copy) });
+    const edit = el("button", { class: "btn", textContent: "Edit…", "aria-label": `Edit ${s.name}`, onclick: () => openEdit(s) });
     panel.append(el("h3", { class: "sec", textContent: "Value" }),
-      el("div", { class: "panel-value" }, el("code", { id: "inspector-value", textContent: s.public ? (publicValues.get(s.name)?.value ?? "Public value · copy to read") : MASK }), copy),
+      el("div", { class: "panel-value" }, el("code", { id: "inspector-value", textContent: s.public ? (publicValues.get(s.name)?.value ?? "Public value · copy to read") : MASK }), edit, copy),
       el("p", { class: "hint", textContent: `Copying never reveals a secret here. Clipboard clears in ${cfg?.clip_seconds ?? 30}s.` }));
   }
   panel.append(el("h3", { class: "sec", textContent: "Who can use it" }));
@@ -2965,6 +3039,12 @@ $("rows").addEventListener("keydown", (e) => {
 $("add-open").addEventListener("click", openAdd);
 $("lock-fix").addEventListener("click", fixLockKeys);
 accessPicker($("add-access"), "add-level", levelsFor(false));
+compactAccessRows($("add-access"));
+// Public has its own radio name (the three levels announce "1 of 3"); keep the two groups exclusive.
+$("add-access").addEventListener("change", (e) => {
+  const isPublic = e.target.value === "public";
+  $("add-access").querySelectorAll("input").forEach((n) => { if ((n.value === "public") !== isPublic) n.checked = false; });
+});
 accessPicker($("aws-access"), "aws-level", levelsFor(true));
 $("add-cancel").addEventListener("click", () => $("add-dialog").close());
 $("add-dialog").addEventListener("close", () => ($("add-value").value = ""));
@@ -3361,6 +3441,8 @@ function dismissDialog(dlg) {
 }
 function openDialog(dlg) {
   const parent = [...document.querySelectorAll("dialog[open]")].filter((n) => n !== dlg).pop();
+  // A dialog with its own step-back (data-own-back) shows only that one.
+  if (dlg.querySelector("[data-own-back]")) { dlg.querySelector(":scope > .dialog-back")?.remove(); dlg.showModal(); return; }
   let back = dlg.querySelector(":scope > .dialog-back");
   if (!back) {
     back = el("button", { type: "button", class: "btn sm step-back dialog-back", textContent: "← Back", onclick: () => dismissDialog(dlg) });
@@ -3376,9 +3458,6 @@ for (const dlg of document.querySelectorAll("dialog")) {
   dlg.prepend(close);
 }
 $("add-back").onclick = () => { $("add-dialog").close(); openDialog($("folder-dialog")); };
-document.querySelector(".lease-limits .step-back").onclick = () => {
-  const limits = document.querySelector(".lease-limits"); limits.open = false; limits.querySelector("summary").focus();
-};
 $("aws-portal-back").onclick = () => {
   const option = [...$("aws-portal").options].find((o) => o.value && o.value !== NEW_PORTAL);
   $("aws-portal").value = option?.value || ""; syncPortal(); $("aws-portal").focus();
