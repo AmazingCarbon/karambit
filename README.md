@@ -197,6 +197,9 @@ What Karambit does not do:
   still fail late. Keep big values in a file the program reads.
 - `run --jail` (a macOS sandbox) is experimental. Do not use it as a security boundary.
 
+If your agent harness has a filesystem sandbox, deny the agent writes to Karambit's files:
+see [Run the agent in a sandbox](docs/agents.md#run-the-agent-in-a-sandbox).
+
 Run `karambit doctor --agent-env` from a plain shell and from inside your agent, then compare.
 It checks a few things from that environment, for that run only. A pass is not a safety guarantee.
 
