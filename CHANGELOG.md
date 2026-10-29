@@ -7,6 +7,8 @@ All notable changes to Karambit are listed here. The format follows
 
 ### Added
 
+- `install.sh` signs the binaries with the hardened runtime (ad-hoc). A same-user debugger can't attach to the
+  daemon, and `DYLD_*` injection is ignored.
 - `karambit mv OLD NEW` renames a secret, and `karambit mv OLD/ NEW/` moves a folder. Value, access
   level and backup copy are kept; it is human-only, asks for Touch ID and ends temporary access.
 - App: an Edit button for secrets (name, value and access) and "Rename or move…" in the folder menu.
