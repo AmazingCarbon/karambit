@@ -64,6 +64,33 @@ changed, the sandbox could not be installed, the environment is too large), you 
 The status descriptor must not be stdout or stderr: karambit refuses that, because the command
 could then write a fake line. Use a pipe; a file path lets the command open and write it too.
 
+## Run the agent in a sandbox
+
+Karambit's files are yours, so any program that runs as you can change them. An agent that
+runs unsandboxed can replace the `karambit` binary, edit the pins in
+`~/.local/share/karambit/keys/` or the config, or add an SSH key to use `ssh localhost`.
+If your agent harness supports a filesystem sandbox (for example a macOS Seatbelt profile),
+deny the agent writes to these paths:
+
+- `~/.local/bin` (the `karambit` and `karambit-se-helper` binaries)
+- `~/.local/share/karambit` (secrets, keys, pins, config, audit log)
+- `~/Applications/Karambit.app`
+- `~/.ssh`
+
+The agent only needs to read these paths and to connect to the daemon socket. With such a
+rule, `karambit ls` and `karambit status` keep working while the daemon is already running
+(tested on macOS 26). Start the daemon outside the sandbox first, for example by opening the
+Karambit app or running `karambit status` in a plain terminal. A daemon that the sandboxed
+agent starts would run inside the sandbox too, and it can't write to its own folder.
+Seatbelt matches real paths, so write `/private/tmp/...`, not `/tmp/...`, in a rule.
+
+What this does not fix: the agent can still use the no-prompt key files to read Public and
+Agents secrets (limit #6 in the [threat model](threat-model.md)), and it can still read the
+environment of other processes that run as you. To block those too, the agent must also be
+denied reads of `~/.local/share/karambit` and the `ps -E` style process information, which
+most agent sandboxes do not offer. `karambit doctor --agent-env`, run from inside the agent,
+shows what that environment can reach.
+
 ## Why there is no MCP server (yet)
 
 Agents already have a shell, and the CLI gives them everything an MCP server would:
