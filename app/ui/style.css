@@ -952,10 +952,9 @@ input:checked + span .access-radio { border-color: var(--accent); background: va
 .panel-lease .btn { border: 0; margin-right: 6px; }
 .inspector .access-step > span, #add-access .access-step > span { color: var(--fg); align-items: flex-start; }
 .inspector .access-step svg, #add-access .access-step svg, .access-radio { margin-top: 3px; }
-/* Public is a separate, quieter last choice below the three levels. */
-#add-access > .access-step { margin-top: 10px; }
-#add-access > .access-step > span { padding: 8px 12px; font-size: 13px; color: var(--fg-2); background: none; }
-#add-access > .access-step input:checked + span { padding: 8px 12px; color: var(--fg); background: var(--accent-soft); }
+/* Public is the last row of the same box: same padding, background and divider as the levels. */
+.inspector .compact-access > .access-step > span, #add-access > .access-step > span { padding: 12px; font-size: 14px; gap: 12px; color: var(--fg); background: var(--muted-bg); border-top: 1px solid var(--line); }
+.inspector .compact-access > .access-step input:checked + span, #add-access > .access-step input:checked + span { padding: 12px; color: var(--fg); background: var(--accent-soft); }
 #add-access { margin-top: 6px; }
 
 /* Compact Secrets header — row 1 title + actions, row 2 filter + chips. */
