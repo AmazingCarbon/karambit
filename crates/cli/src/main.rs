@@ -266,6 +266,14 @@ enum Cmd {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
+    /// Rename a secret, or move a folder (both ending in /). Keeps value and access; asks for Touch ID.
+    #[command(alias = "rename")]
+    Mv {
+        /// Current name, e.g. stripe/key, or a folder, e.g. stripe/.
+        from: String,
+        /// New name, e.g. payments/stripe-key, or a folder, e.g. payments/.
+        to: String,
+    },
     /// Delete secrets (glob ok).
     Rm {
         /// Secret names or globs, e.g. 'old/*'.
@@ -1179,6 +1187,7 @@ fn command_verb(cmd: &Cmd) -> Option<Verb> {
         // `run --no-redact` is looked up in launch_bound, inside the audited run-child intent.
         Cmd::Run { .. } => None,
         Cmd::Rm { .. } => Some(Verb::Rm),
+        Cmd::Mv { .. } => Some(Verb::Rename),
         Cmd::Lease { cmd: LeaseCmd::Grant { .. } } => Some(Verb::LeaseGrant),
         Cmd::Lease { cmd: LeaseCmd::List | LeaseCmd::Revoke { .. } } => None,
         Cmd::Recover { .. } => Some(Verb::Recover),
@@ -1350,6 +1359,11 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
         Cmd::Rm { patterns } => {
             for n in v.remove(&patterns)? {
                 println!("removed {n}");
+            }
+        }
+        Cmd::Mv { from, to } => {
+            for (old, new) in v.rename(&from, &to)? {
+                println!("renamed {old} -> {new}");
             }
         }
         Cmd::Config { key, value } => match (key, value) {
@@ -2108,6 +2122,7 @@ mod tests {
             (Verb::Add, vec!["aws", "session-mint", "p", "off"]),
             (Verb::Add, vec!["aws", "add", "p", "--sso", "--account", "111111111111", "--role", "R"]),
             (Verb::Rm, vec!["rm", "test/bio"]),
+            (Verb::Rename, vec!["mv", "test/bio", "test/moved"]),
             (Verb::Rm, vec!["aws", "rm", "p"]),
             (Verb::PolicyRelax, vec!["policy", "test/bio", "--agent", "allow"]),
             (Verb::PolicyRelax, vec!["policy", "test/bio", "--touch", "off"]),

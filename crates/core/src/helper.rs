@@ -46,6 +46,7 @@ prompts! {
     AddRelaxed("add_relaxed", names, caller, access);
     ChangePolicy("change_policy", names, caller);
     Delete("delete", names, caller);
+    Rename("rename", from, to, caller);
     UpgradeKeys("upgrade_keys", names);
     MoveAgentKey("move_agent_key");
     VerifyAgentKey("verify_agent_key");
