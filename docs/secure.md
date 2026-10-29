@@ -43,6 +43,43 @@ that sets one as a plain value, for humans too, because the schema is trusted au
 If a `.env` was ever committed, rotate those keys: deleting the file doesn't change git
 history. Overwriting on an SSD is not secure erase either.
 
+## Which processes get the secrets
+
+`karambit run` starts one command. That command and every process it starts get the
+injected environment, and their stdout and stderr go through Karambit's redaction. Framework
+workers (for example `next dev` workers) are covered in the same way.
+
+Where `karambit run` sits in the process tree depends on the `package.json` wiring:
+
+```text
+Wired (default): "dev": "karambit run -- next dev"
+  npm run dev                      no secrets
+  └─ karambit run                  redacts stdout and stderr
+     └─ next dev                   has the secrets
+        └─ workers                 have the secrets
+
+Not wired (--no-scripts): you run `karambit run -- npm run dev`
+  karambit run                     redacts stdout and stderr
+  └─ npm run dev                   has the secrets
+     └─ sh -c "next dev"           has the secrets
+        └─ next dev, workers       have the secrets
+```
+
+- **Wired:** `npm` and its `pre*`/`post*` scripts run without secrets. Only the wired script
+  and its child processes get them.
+- **Not wired:** `package.json` and `bunfig.toml` are not changed. `npm`, its lifecycle
+  scripts and the shell it starts also get the secrets.
+- **Both:** trusting the schema pins the `package.json` `scripts` (see above), with or
+  without `--no-scripts`. The pin stops a detected agent only. A human gets a warning, and
+  any process that runs as you can edit the pin in the config.
+- **Both:** every process below `karambit run` holds the values in its environment while
+  it runs, and any process that runs as you can read that environment (for example
+  `ps -E`). Redaction covers only stdout and stderr. Output written to `/dev/tty`, to a
+  file or to the network is not redacted, and encoded copies (for example base64) are not
+  caught. See the [threat model](threat-model.md), section 4.
+- **Both:** `karambit run` ends when the last process closes stdout and stderr. A
+  background process that keeps them open keeps `karambit run` waiting.
+
 `.env.schema` uses varlock's @env-spec format, so existing varlock schemas mostly work:
 
 ```sh
