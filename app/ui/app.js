@@ -1063,6 +1063,9 @@ async function renderDetail() {
   $("lease-help").textContent = help;
   $("lease-help").hidden = help === "";
   $("lease-touch-note").hidden = controls.hidden || help !== ""; // warnings above already say Touch ID is asked once
+  // Touch ID entry with agents allowed: no warning banner, but keep what the grant does as a grey hint.
+  const bioAgents = !isFolder && leasable.length > 0 && items[0].agent_allowed && items[0].tier === "bio";
+  $("lease-touch-note").textContent = `${bioAgents ? "Lets the chosen agent use this without a Touch ID prompt until it ends. " : ""}Touch ID is asked once to confirm. `;
 
   // Activity: per secret, or merged across the folder.
   const names = isFolder ? items.map((s) => s.name) : [d.name];
@@ -2698,7 +2701,36 @@ function setFormError(id, text) {
   $(id).textContent = text;
 }
 
+// The Add dialog also edits: name locked, value optional (empty keeps it), access prefilled.
+let editing = null; // the secret being edited, or null for a new secret
+function setAddMode(s) {
+  editing = s;
+  $("add-title").textContent = s ? `Edit ${s.name}` : "New secret";
+  $("add-hint").textContent = s
+    ? "Leave the value empty to keep it. A new value replaces the old one, asks for Touch ID and ends any temporary access."
+    : "Name it folder/name. A new folder appears when you save.";
+  $("add-name").readOnly = !!s;
+  $("add-value").required = !s;
+  $("add-value").placeholder = s ? "Keep the current value" : "";
+  $("add-force-row").hidden = !!s;
+}
+function openEdit(s) {
+  setAddMode(s);
+  $("add-back").hidden = true;
+  $("add-form").reset();
+  $("add-name").value = s.name;
+  $("add-form").querySelectorAll("input.touched").forEach((n) => n.classList.remove("touched"));
+  setFormError("add-error", "");
+  // A retired "Only me" level has no radio: nothing is checked, so the owner must pick a new one.
+  const current = $("add-access").querySelector(`input[value="${accessOf(s)}"]`);
+  if (current) current.checked = true;
+  syncAccessHint($("add-access"));
+  openDialog($("add-dialog"));
+  $("add-value").focus();
+}
+
 function openAdd(folder = currentFolder, fromFolder = false) {
+  setAddMode(null);
   $("add-back").hidden = !fromFolder;
   if (typeof folder !== "string") folder = currentFolder;
   $("add-form").reset();
@@ -2720,7 +2752,9 @@ $("add-form").addEventListener("invalid", (e) => e.target.classList.add("touched
 async function submitAdd(ev) {
   ev.preventDefault();
   const level = $("add-access").querySelector('input[value="public"]:checked') ? "public" : $("add-form").elements["add-level"].value;
+  if (!level) { setFormError("add-error", "Choose who can use it."); return; }
   const flags = levelFlags(level);
+  if (editing) { await submitEdit(editing, level, flags); return; }
   const args = {
     name: $("add-name").value.trim(),
     value: $("add-value").value,
@@ -2735,6 +2769,35 @@ async function submitAdd(ev) {
     $("add-value").value = "";
     $("add-dialog").close();
     toast(`Saved ${args.name}`);
+    loadSecrets();
+  } catch (err) {
+    setFormError("add-error", String(err)); // toast shown too; keep dialog open
+  }
+}
+
+async function submitEdit(s, level, flags) {
+  const value = $("add-value").value;
+  setFormError("add-error", "");
+  if (flags.public !== !!s.public) {
+    const ok = await confirmDialog(flags.public ? `Make ${s.name} public?` : `Make ${s.name} secret?`, [
+      flags.public ? `Agents will be able to read ${s.name} and it won't be redacted. Use this only for identifiers like emails and URLs.`
+        : `${s.name} will be hidden from agents and redacted again.`,
+    ], flags.public ? "Make public" : "Make secret", false);
+    if (!ok) return;
+  }
+  try {
+    if (value) {
+      // Same backend path as "Overwrite if it exists": Touch ID, new key, leases end.
+      await call("add", { name: s.name, value, ...flags, overwrite: true }, $("add-submit"));
+    } else if (level !== accessOf(s)) {
+      await call("set_policy", { names: [s.name], ...flags }, $("add-submit"));
+    } else {
+      $("add-dialog").close();
+      return;
+    }
+    $("add-value").value = "";
+    $("add-dialog").close();
+    toast(value ? `Updated ${s.name}` : `${s.name}: ${accessLevel(level).label}`);
     loadSecrets();
   } catch (err) {
     setFormError("add-error", String(err)); // toast shown too; keep dialog open
@@ -2761,8 +2824,9 @@ function renderInspector() {
   if (isAws(s.name)) { panel.append(aws); renderAwsDetail(s); }
   else {
     const copy = el("button", { class: "btn primary", textContent: "Copy", onclick: () => copyValue(s.name, copy) });
+    const edit = el("button", { class: "btn", textContent: "Edit…", "aria-label": `Edit ${s.name}`, onclick: () => openEdit(s) });
     panel.append(el("h3", { class: "sec", textContent: "Value" }),
-      el("div", { class: "panel-value" }, el("code", { id: "inspector-value", textContent: s.public ? (publicValues.get(s.name)?.value ?? "Public value · copy to read") : MASK }), copy),
+      el("div", { class: "panel-value" }, el("code", { id: "inspector-value", textContent: s.public ? (publicValues.get(s.name)?.value ?? "Public value · copy to read") : MASK }), edit, copy),
       el("p", { class: "hint", textContent: `Copying never reveals a secret here. Clipboard clears in ${cfg?.clip_seconds ?? 30}s.` }));
   }
   panel.append(el("h3", { class: "sec", textContent: "Who can use it" }));

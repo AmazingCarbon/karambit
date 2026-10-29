@@ -300,7 +300,7 @@
   <dialog id="add-dialog" aria-labelledby="add-title">
     <form id="add-form" method="dialog">
       <button type="button" id="add-back" class="btn sm step-back" data-own-back hidden>← Back</button>
-      <h2 id="add-title">New secret</h2><p class="hint">Name it folder/name. A new folder appears when you save.</p>
+      <h2 id="add-title">New secret</h2><p id="add-hint" class="hint">Name it folder/name. A new folder appears when you save.</p>
       <label class="lbl" for="add-name">Name</label>
       <input id="add-name" required autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*(/[A-Za-z0-9_\-][A-Za-z0-9._\-]*)*" placeholder="folder/name">
       <label class="lbl" for="add-value">Value</label>
@@ -311,7 +311,7 @@
         <div id="add-access" class="compact-access"></div>
       </fieldset>
       <div class="opts">
-        <label class="row">
+        <label class="row" id="add-force-row">
           <span class="row-text"><b>Overwrite if it exists</b></span>
           <span class="sw"><input type="checkbox" id="add-force"><span class="track" aria-hidden="true"></span></span>
         </label>
