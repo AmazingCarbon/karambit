@@ -57,6 +57,11 @@ async fn set_policy(names: Vec<String>, touch: Option<String>, agent_allowed: Op
 }
 
 #[tauri::command]
+async fn rename(from: String, to: String) -> R<Value> {
+    Ok(json!(karambit()?.rename(from.trim(), to.trim()).map_err(e)?))
+}
+
+#[tauri::command]
 async fn remove(names: Vec<String>) -> R<Value> {
     Ok(json!(karambit()?.remove(&names).map_err(e)?))
 }
@@ -650,7 +655,7 @@ fn main() {
         .manage(SignIn::default())
         .manage(Paper::default())
         .invoke_handler(tauri::generate_handler![
-            status, status_full, doctor, aws_whoami, policy_explain, profile_preview, profile_trust, profile_list, init, list, add, block_agents, paper_new, paper_confirm, paper_cancel, backup_verify, paper_check_row, recover, set_policy, remove, copy_secret, audit, get_config, set_config, agents_discover, aws_add, aws_show,
+            status, status_full, doctor, aws_whoami, policy_explain, profile_preview, profile_trust, profile_list, init, list, add, block_agents, paper_new, paper_confirm, paper_cancel, backup_verify, paper_check_row, recover, set_policy, rename, remove, copy_secret, audit, get_config, set_config, agents_discover, aws_add, aws_show,
             lease_grant, lease_revoke, lease_revoke_all, activity, public_values, keys_upgrade, aws_add_sso, sso_discover, aws_import_sso, sso_status, sso_logout, sso_portal_add,
             sso_portal_remove, sso_portal_limit, sso_login, sso_login_cancel, sso_open_browser,
             source_kinds, source_list, source_add, source_retarget, source_remove, classify_reference

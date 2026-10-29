@@ -913,6 +913,116 @@ impl Karambit {
         })
     }
 
+    /// Rename one secret, or move a folder (`from` and `to` ending in `/`), keeping each
+    /// value, access level, created time and DEK (so the offline backup copy stays valid).
+    /// The name is bound into both AADs, so every file is resealed and rewrapped: one
+    /// Touch ID approves the unwrap. New names must be free; leases on old names end.
+    pub fn rename(&self, from: &str, to: &str) -> Result<Vec<(String, String)>> {
+        self.require_human(fence::Verb::Rename, fence::Layer::Cli)?;
+        let r = daemon::request(&self.paths, &daemon::Req::Rename { from: from.into(), to: to.into() })?;
+        Ok(serde_json::from_value(r)?)
+    }
+
+    /// `(old, new)` pairs for a rename or folder move, validated, before any prompt.
+    fn rename_plan(&self, from: &str, to: &str) -> Result<Vec<(SecretFile, String)>> {
+        let folder = from.ends_with('/');
+        anyhow::ensure!(folder == to.ends_with('/'), "rename a secret to a name, or a folder (ending in /) to a folder");
+        let (src, dst) = (from.trim_end_matches('/'), to.trim_end_matches('/'));
+        store::validate_name(src)?;
+        store::validate_name(dst)?;
+        anyhow::ensure!(src != dst, "{from} and {to} are the same");
+        if folder {
+            anyhow::ensure!(!dst.starts_with(&format!("{src}/")), "can't move {from} into itself");
+        }
+        let all = store::list_secrets(&self.paths)?;
+        let moving: Vec<SecretFile> = if folder {
+            all.iter().filter(|f| f.name.starts_with(&format!("{src}/"))).cloned().collect()
+        } else {
+            all.iter().filter(|f| f.name == src).cloned().collect()
+        };
+        if moving.is_empty() { bail!("no secret matches {from}"); }
+        let plan: Vec<(SecretFile, String)> = moving.into_iter().map(|f| {
+            let new = if folder { format!("{dst}{}", &f.name[src.len()..]) } else { dst.to_string() };
+            (f, new)
+        }).collect();
+        for (f, new) in &plan {
+            store::validate_name(new)?;
+            for n in [&f.name, new] {
+                store::require_generic_name(n)?;
+                if n.starts_with("aws/") || n == "aws" { bail!("AWS profiles can't be renamed; add the profile again under the new name"); }
+            }
+            // x.json and the folder x/ are separate paths (as with `add`), so only an exact
+            // name clashes; moving test/a to test/a/b is allowed.
+            if all.iter().any(|o| &o.name == new) { bail!("{new} already exists"); }
+        }
+        Ok(plan)
+    }
+
+    pub(crate) fn rename_internal(&self, from: &str, to: &str, dispatch: impl Fn(daemon::Req) -> Result<Value>) -> Result<Vec<(String, String)>> {
+        self.require_init()?;
+        self.require_human(fence::Verb::Rename, fence::Layer::Daemon)?;
+        let plan = self.rename_plan(from, to)?;
+        // The approver must see both names in full (the helper cuts fields at 120 characters).
+        for n in [from, to] {
+            if platform::helper::prompt_param(n) != n { bail!("name too long for the Touch ID prompt: {n}"); }
+        }
+        let old: Vec<String> = plan.iter().map(|(f, _)| f.name.clone()).collect();
+        let new: Vec<String> = plan.iter().map(|(_, n)| n.clone()).collect();
+        self.audited("rename", &old, json!({"from": from, "to": to, "new": new}), || {
+            let files: Vec<SecretFile> = plan.iter().map(|(f, _)| f.clone()).collect();
+            let reason = Prompt::Rename { from: from.into(), to: to.into(), caller: self.caller.label() };
+            // Open-tier secrets unwrap without a prompt; a rename still needs the human's Touch ID.
+            if files.iter().all(|f| f.tier == Tier::Open) {
+                platform::helper::auth(&reason)?;
+            }
+            let deks = self.unwrap_deks_local(&files, &reason)?;
+            let pk = self.pubkeys_local()?;
+            // Build and check everything before the first write.
+            let mut built = Vec::with_capacity(plan.len());
+            for ((f, name), dek) in plan.iter().zip(deks.iter()) {
+                let value = crypto::open(dek, f)?;
+                let public = f.is_public();
+                let key = self.key_for(f.tier, f.agent_allowed, public);
+                let w = crypto::wrap_dek(dek, pk.get(key)?, name, f.tier, f.agent_allowed, public)?;
+                let (nonce, ct) = crypto::seal(dek, name, &value)?;
+                let backup = match (&f.backup, &self.cfg.backup_recipient) {
+                    (Some(b), _) => Some(b.clone()), // same DEK: the existing backup copy still opens it
+                    (None, Some(r)) => Some(crypto::backup_wrap(dek, r)?),
+                    (None, None) => None,
+                };
+                built.push(SecretFile {
+                    v: crypto::CURRENT_V, name: name.clone(), tier: f.tier, agent_allowed: f.agent_allowed, public,
+                    eph: w.eph, wrap_nonce: w.wrap_nonce, wrapped_dek: w.wrapped_dek, nonce, ct, backup,
+                    created: f.created, updated: store::now(), key: Some(key),
+                });
+            }
+            // A file replaced during the Touch ID prompt would otherwise be lost: its newer
+            // value would be deleted and the old snapshot written under the new name.
+            for (f, _) in &plan {
+                if serde_json::to_value(store::load_secret(&self.paths, &f.name)?)? != serde_json::to_value(f)? {
+                    bail!("{} changed during approval; retry", f.name);
+                }
+            }
+            // Create-new only: a rename never replaces another secret. Undo on failure.
+            let mut written: Vec<String> = Vec::new();
+            for nf in &built {
+                match store::save_secret_new(&self.paths, nf) {
+                    Ok(true) => written.push(nf.name.clone()),
+                    other => {
+                        for n in &written { let _ = store::remove_secret(&self.paths, n); }
+                        other?;
+                        bail!("{} already exists", nf.name);
+                    }
+                }
+            }
+            for n in &old {
+                store::remove_secret(&self.paths, n)?;
+            }
+            self.end_leases_internal(&old, "renamed", &dispatch);
+            Ok(old.iter().cloned().zip(new.iter().cloned()).collect())
+        })
+    }
+
     pub fn set_config(&mut self, key: &str, value: &str) -> Result<()> {
         if self.config_relaxes(key, value) {
             self.require_human(fence::Verb::ConfigRelax, fence::Layer::Cli)?;
@@ -2588,6 +2698,150 @@ mod proof_tests {
         let events = audit::read(&v.paths, usize::MAX).unwrap();
         assert!(!serde_json::to_string(&events).unwrap().contains(identity.lines().find(|line| line.starts_with("AGE-SECRET-KEY-")).unwrap()), "paper identity leaked to audit");
         assert!(events.iter().any(|e| e["detail"]["paper_only_biometrics_unavailable"] == true));
+        fs::remove_dir_all(v.paths.root).unwrap();
+    }
+
+    fn rename_value(v: &Karambit, name: &str) -> Vec<u8> {
+        let f = store::load_secret(&v.paths, name).unwrap();
+        crypto::open(&soft_unwrap(&f, 7).unwrap(), &f).unwrap().to_vec()
+    }
+
+    #[test]
+    fn rename_keeps_value_access_created_and_backup_and_ends_leases() {
+        let _dispatch = RecoveryDispatch::install();
+        let mut v = fixture("rename-one");
+        let (identity, recipient) = crypto::generate_backup_identity();
+        v.cfg.backup_recipient = Some(recipient);
+        store::save_config(&v.paths, &v.cfg).unwrap();
+        let dek = secret(&v, "test/old", Tier::Bio, true);
+        let before = store::load_secret(&v.paths, "test/old").unwrap();
+        let calls = auth(true);
+        soft_ecdh();
+        assert_eq!(v.rename("test/old", "moved/new").unwrap(), vec![("test/old".to_string(), "moved/new".to_string())]);
+        assert!(!v.paths.secret("test/old").unwrap().exists(), "old file must be gone");
+        assert!(!v.paths.secrets().join("test").exists(), "empty folder pruned");
+        let after = store::load_secret(&v.paths, "moved/new").unwrap();
+        assert_eq!((after.tier, after.agent_allowed, after.is_public(), after.created), (before.tier, before.agent_allowed, before.is_public(), before.created));
+        assert_eq!(rename_value(&v, "moved/new"), b"synthetic proof fixture");
+        // Same DEK, so the existing paper-backup copy still opens the renamed file.
+        let paper = crypto::backup_unwrap(after.backup.as_ref().unwrap(), &crypto::parse_identity(&identity).unwrap()).unwrap();
+        assert_eq!(paper.as_ref(), dek.as_ref());
+        assert_eq!(calls.get(), 0, "a Touch ID secret is approved by the unwrap itself, not a second prompt");
+        let events = audit::read(&v.paths, usize::MAX).unwrap();
+        assert!(events.iter().any(|e| e["action"] == "rename" && e["phase"] == "intent" && e["detail"]["new"][0] == "moved/new"));
+        assert!(events.iter().any(|e| e["action"] == "rename" && e["phase"] == "outcome" && e["ok"] == true));
+        // Leases on the old name end: the daemon is asked to revoke exactly that name.
+        let revoked = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let seen = revoked.clone();
+        soft_ecdh();
+        v.rename_internal("moved/new", "moved/again", move |req| {
+            if let daemon::Req::Revoke { patterns } = req { seen.borrow_mut().extend(patterns); }
+            Ok(json!({"revoked": []}))
+        }).unwrap();
+        assert_eq!(*revoked.borrow(), vec!["moved/new".to_string()]);
+        platform::helper::ECDH_HOOK.with(|h| h.borrow_mut().take());
+        platform::helper::AUTH_HOOK.with(|h| h.borrow_mut().take());
+        fs::remove_dir_all(v.paths.root).unwrap();
+    }
+
+    #[test]
+    fn rename_refuses_a_secret_replaced_during_approval() {
+        let _dispatch = RecoveryDispatch::install();
+        let v = fixture("rename-race");
+        secret(&v, "test/a", Tier::Open, true);
+        let paths = v.paths.clone();
+        let racer = fixture_clone(&v);
+        platform::helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+            // Another writer replaces the value while the prompt is open.
+            secret(&racer, "test/a", Tier::Open, true);
+            Ok(())
+        })));
+        soft_ecdh();
+        let error = v.rename("test/a", "test/b").unwrap_err().to_string();
+        assert!(error.contains("changed during approval"), "{error}");
+        assert!(paths.secret("test/a").unwrap().exists() && !paths.secret("test/b").unwrap().exists());
+        platform::helper::ECDH_HOOK.with(|h| h.borrow_mut().take());
+        platform::helper::AUTH_HOOK.with(|h| h.borrow_mut().take());
+        fs::remove_dir_all(v.paths.root).unwrap();
+    }
+
+    fn fixture_clone(v: &Karambit) -> Karambit {
+        Karambit { paths: v.paths.clone(), cfg: v.cfg.clone(), caller: Caller::default(), run_cmd: None }
+    }
+
+    #[test]
+    fn rename_into_a_folder_named_like_the_secret_itself() {
+        let _dispatch = RecoveryDispatch::install();
+        let v = fixture("rename-under-self");
+        secret(&v, "test/me", Tier::Open, true);
+        secret(&v, "test/other", Tier::Open, true);
+        auth(true);
+        soft_ecdh();
+        v.rename("test/me", "test/me/inner").unwrap();
+        assert!(!v.paths.secret("test/me").unwrap().exists());
+        assert_eq!(rename_value(&v, "test/me/inner"), b"synthetic proof fixture");
+        // A secret may sit beside a folder of the same name, as `add` allows.
+        auth(true);
+        soft_ecdh();
+        v.rename("test/other", "test/me").unwrap();
+        assert!(v.paths.secret("test/me").unwrap().exists() && v.paths.secret("test/me/inner").unwrap().exists());
+        platform::helper::ECDH_HOOK.with(|h| h.borrow_mut().take());
+        platform::helper::AUTH_HOOK.with(|h| h.borrow_mut().take());
+        fs::remove_dir_all(v.paths.root).unwrap();
+    }
+
+    #[test]
+    fn folder_move_renames_every_item_under_one_prompt() {
+        let _dispatch = RecoveryDispatch::install();
+        let v = fixture("rename-folder");
+        for name in ["app/a", "app/sub/b", "apple/c"] { secret(&v, name, Tier::Open, true); }
+        let calls = auth(true);
+        soft_ecdh();
+        let mut moved = v.rename("app/", "svc/app/").unwrap();
+        moved.sort();
+        assert_eq!(moved, vec![("app/a".into(), "svc/app/a".into()), ("app/sub/b".into(), "svc/app/sub/b".into())]);
+        assert_eq!(calls.get(), 1, "open-tier items: one explicit Touch ID for the whole move");
+        let names: Vec<String> = store::list_secrets(&v.paths).unwrap().into_iter().map(|f| f.name).collect();
+        assert!(names.contains(&"apple/c".to_string()), "a sibling with the same prefix is untouched");
+        for name in ["svc/app/a", "svc/app/sub/b"] { assert_eq!(rename_value(&v, name), b"synthetic proof fixture"); }
+        assert!(!names.iter().any(|n| n.starts_with("app/")));
+        platform::helper::ECDH_HOOK.with(|h| h.borrow_mut().take());
+        platform::helper::AUTH_HOOK.with(|h| h.borrow_mut().take());
+        fs::remove_dir_all(v.paths.root).unwrap();
+    }
+
+    #[test]
+    fn rename_refuses_clashes_reserved_names_agents_and_denied_touch_id_without_changing_files() {
+        let _dispatch = RecoveryDispatch::install();
+        let v = fixture("rename-refuse");
+        for name in ["test/a", "test/b", "dir/x"] { secret(&v, name, Tier::Open, true); }
+        let snapshot = || { let mut n: Vec<(String, String)> = store::list_secrets(&v.paths).unwrap().into_iter().map(|f| (f.name, f.ct)).collect(); n.sort(); n };
+        let before = snapshot();
+        let calls = auth(true);
+        soft_ecdh();
+        for (from, to, want) in [
+            ("test/a", "test/b", "already exists"),
+            ("test/a", "dir/x", "already exists"),
+            ("test/a", "test/a", "the same"),
+            ("test/", "test/inner/", "into itself"),
+            ("test/a", "other/", "folder (ending in /)"),
+            ("test/a", "aws/prod", "AWS profiles"),
+            ("test/a", "sources/x/cred", "reserved"),
+            ("missing/x", "test/c", "no secret matches"),
+            ("test/a", "../escape", "invalid secret name"),
+        ] {
+            let error = v.rename(from, to).unwrap_err().to_string();
+            assert!(error.contains(want), "{from} -> {to}: {error}");
+        }
+        assert_eq!(calls.get(), 0, "refused before any prompt");
+        let agent = Karambit { paths: v.paths.clone(), cfg: v.cfg.clone(), caller: Caller { agent: Some("synthetic".into()), ..Default::default() }, run_cmd: None };
+        assert!(agent.rename("test/a", "test/c").unwrap_err().to_string().contains("human-only"));
+        assert!(agent.rename_internal("test/a", "test/c", |_| Ok(json!({}))).unwrap_err().to_string().contains("human-only"));
+        auth(false);
+        assert!(v.rename("test/a", "test/c").unwrap_err().to_string().contains("auth refused"));
+        assert_eq!(snapshot(), before, "nothing written or removed");
+        platform::helper::ECDH_HOOK.with(|h| h.borrow_mut().take());
+        platform::helper::AUTH_HOOK.with(|h| h.borrow_mut().take());
         fs::remove_dir_all(v.paths.root).unwrap();
     }
 

@@ -3,6 +3,14 @@
 All notable changes to Karambit are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- `karambit mv OLD NEW` renames a secret, and `karambit mv OLD/ NEW/` moves a folder. Value, access
+  level and backup copy are kept; it is human-only, asks for Touch ID and ends temporary access.
+- App: an Edit button for secrets (name, value and access) and "Rename or move…" in the folder menu.
+
 ## [0.1.0] - 2026-10-29
 
 Alpha. Not independently audited. macOS only for now. See the [threat model](docs/threat-model.md)

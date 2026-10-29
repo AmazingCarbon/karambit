@@ -530,6 +530,12 @@
     <label class="lbl" for="folder-name">Folder name</label><input id="folder-name" required pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*(/[A-Za-z0-9_\-][A-Za-z0-9._\-]*)*" autocomplete="off">
     <div class="actions"><button type="button" class="btn" id="folder-cancel">Cancel</button><button class="btn primary" type="submit">Add first secret</button></div></form>
   </dialog>
+  <dialog id="move-dialog" aria-labelledby="move-title">
+    <form id="move-form"><h2 id="move-title">Rename or move folder</h2><p id="move-hint" class="hint"></p>
+    <label class="lbl" for="move-name">New folder path</label><input id="move-name" required spellcheck="false" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*(/[A-Za-z0-9_\-][A-Za-z0-9._\-]*)*" autocomplete="off">
+    <p id="move-error" class="form-error" role="alert"></p>
+    <div class="actions"><button type="button" class="btn" id="move-cancel">Cancel</button><button class="btn primary" type="submit" id="move-submit">Move</button></div></form>
+  </dialog>
   <dialog id="palette-dialog" aria-labelledby="palette-title"><h2 id="palette-title" class="sr-only">Find anything</h2>
     <label class="sr-only" for="palette-query">Search folders, secrets and sources</label><input id="palette-query" role="combobox" aria-controls="palette-results" aria-expanded="true" aria-autocomplete="list" type="search" placeholder="Find a folder, secret or source" autocomplete="off">
     <div id="palette-results" role="listbox" aria-label="Search results"></div><p class="hint">↑ ↓ Move · Enter opens a folder or copies a secret · ⌘I Details · Esc closes</p>

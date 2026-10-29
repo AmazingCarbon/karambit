@@ -230,6 +230,7 @@ let promptTemplates: [String: (Int, ([String]) -> String)] = [
     "add_relaxed": (3, { "add \($0[0]) with Touch ID off for \($0[1]), access \($0[2])" }),
     "change_policy": (2, { "change policy of \($0[0]) for \($0[1])" }),
     "delete": (2, { "delete \($0[0]) for \($0[1])" }),
+    "rename": (3, { "rename \($0[0]) to \($0[1]) for \($0[2])" }),
     "upgrade_keys": (1, { "create the lock-safe agent key if needed and let agents use \($0[0]) while the screen is locked" }),
     "move_agent_key": (0, { _ in "move secrets to the agent key" }),
     "verify_agent_key": (0, { _ in "verify the agent key" }),
