@@ -16,6 +16,8 @@ All notable changes to Karambit are listed here. The format follows
 - App YOLO dialog, folder and key tags, per-agent banners and Status rows with separate End buttons.
   The dialog defaults to 6 hours. A dedicated helper approval names Only me keys and keys added later;
   the upgrade requires the normal helper and daemon re-pin.
+- `install.sh` signs the binaries with the hardened runtime (ad-hoc). A same-user debugger can't attach to the
+  daemon, and `DYLD_*` injection is ignored.
 - `karambit mv OLD NEW` renames a secret, and `karambit mv OLD/ NEW/` moves a folder. Value, access
   level and backup copy are kept; it is human-only, asks for Touch ID and ends temporary access.
 - A secret can hold up to 8 leases, one for each agent or session. A new grant replaces only that

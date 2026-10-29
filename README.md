@@ -222,7 +222,9 @@ What Karambit does not do:
   Values of secrets released in that launch, and obvious `--password`/`--token`/`Authorization:`/URL-password
   patterns (the whole argument after a secret flag, spaces included), are replaced by `[REDACTED]`; a password in an unusual form can still be recorded.
   The log keeps `argv_sha256` of the real command. Pass secrets with `-e`, not as arguments.
-- No memory locking, core-dump protection or anti-debug yet.
+- `install.sh` signs the binaries with the hardened runtime (ad-hoc, no Apple account), so the kernel refuses a
+  same-user debugger attach and `DYLD_*` injection. There is no memory locking yet, and a process that runs as you can
+  still replace the binaries (the next point).
   Config, the helper pin and the installed binaries are writable by your user.
 - **`package.json` scripts are pinned only for agents.** Trusting a `.env.schema` also pins the
   sibling `package.json` `scripts`. If they change, agents are refused (`profile.untrusted`).
