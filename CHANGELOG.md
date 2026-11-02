@@ -9,7 +9,15 @@ All notable changes to Karambit are listed here. The format follows
 
 - `karambit mv OLD NEW` renames a secret, and `karambit mv OLD/ NEW/` moves a folder. Value, access
   level and backup copy are kept; it is human-only, asks for Touch ID and ends temporary access.
+- A secret can hold up to 8 leases, one for each agent or session. A new grant replaces only that
+  agent's lease. A use is served by one lease and scopes are never combined. `karambit lease revoke NAME --to AGENT`
+  ends one; without `--to` it ends all. The app lists each temporary access with its own End button.
 - App: an Edit button for secrets (name, value and access) and "Rename or move…" in the folder menu.
+
+### Changed
+
+- Granting a lease to one agent no longer replaces another agent's lease on the same secret.
+  `karambit ls --json` and `brief` list every lease (`leases`); `lease` stays as the one that ends first.
 
 ## [0.1.0] - 2026-10-29
 

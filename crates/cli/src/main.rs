@@ -512,6 +512,9 @@ enum LeaseCmd {
     Revoke {
         /// Secret names or globs.
         patterns: Vec<String>,
+        /// End only this agent's lease (pi, claude, any, session:ID). Default: all.
+        #[arg(long)]
+        to: Option<String>,
     },
 }
 
@@ -576,7 +579,7 @@ fn print_secret_table(items: &[karambit_core::SecretMeta]) {
     for s in items {
         let level = explain::level_label(explain::level(s.tier, s.agent_allowed, s.public));
         let mut note = Vec::new();
-        if let Some(l) = &s.lease { note.push(format!("temporary access: {} · {} left", l.info.to_label, dur(l.info.remaining))); }
+        for l in &s.leases { note.push(format!("temporary access: {} · {} left", l.info.to_label, dur(l.info.remaining))); }
         if !s.has_backup { note.push("no backup".into()); }
         println!("{level:<20}  {:<width$}  {}", s.name, note.join("; "));
     }
@@ -788,10 +791,9 @@ fn brief_text(items: &[karambit_core::SecretMeta]) -> String {
     if items.is_empty() { eprintln!("no secrets match"); }
     items.iter().map(|m| {
         let access = explain::level(m.tier, m.agent_allowed, m.public);
-        match &m.lease {
-            Some(l) => format!("{}\t{access}\tlease {} {}\n", m.name, l.info.to_label, dur(l.info.remaining).replace(' ', "")),
-            None => format!("{}\t{access}\n", m.name),
-        }
+        // One `lease <who> <left>` field per grantee.
+        let leases: String = m.leases.iter().map(|l| format!("\tlease {} {}", l.info.to_label, dur(l.info.remaining).replace(' ', ""))).collect();
+        format!("{}\t{access}{leases}\n", m.name)
     }).collect()
 }
 
@@ -800,6 +802,9 @@ fn brief_json(items: &[karambit_core::SecretMeta]) -> serde_json::Value {
     json!(items.iter().map(|m| {
         let mut j = json!({"name": m.name, "access": explain::level(m.tier, m.agent_allowed, m.public)});
         if let Some(l) = &m.lease { j["lease"] = json!({"to": l.info.to_label, "left_s": l.info.remaining}); }
+        if !m.leases.is_empty() {
+            j["leases"] = json!(m.leases.iter().map(|l| json!({"to": l.info.to_label, "left_s": l.info.remaining})).collect::<Vec<_>>());
+        }
         j
     }).collect::<Vec<_>>())
 }
@@ -1430,9 +1435,10 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
                 }
             }
         }
-        Cmd::Lease { cmd: LeaseCmd::Revoke { patterns } } => {
-            for n in v.revoke_lease(&patterns)? {
-                println!("revoked lease on {n}");
+        Cmd::Lease { cmd: LeaseCmd::Revoke { patterns, to } } => {
+            let to = to.as_deref().map(karambit_core::lease::Grantee::parse).transpose()?;
+            for n in v.revoke_lease_for(&patterns, to.as_ref())? {
+                match &to { Some(t) => println!("revoked lease on {n} for {}", t.label()), None => println!("revoked lease on {n}") }
             }
         }
         Cmd::Recover { identity_file, accept_loss } => {

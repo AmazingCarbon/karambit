@@ -126,11 +126,21 @@ Policy rules:
 ```sh
 karambit lease grant 'deploy/*' --hours 3 --to pi --cwd ~/code/myapp --cmd curl --max-uses 50
 karambit lease grant 'deploy/*' --to pi --cmd /opt/homebrew/bin/node --script ./deploy.js   # interpreter + script
-karambit lease ls ; karambit lease revoke 'deploy/*'
+karambit lease ls ; karambit lease revoke 'deploy/*' ; karambit lease revoke 'deploy/*' --to pi
 karambit daemon status ; karambit daemon stop      # stop = every lease ends
 ```
 
 - Default lease length is 3h (max 168).
+- **One lease per agent.** A secret holds up to 8 leases, one for each grantee (`any`, an agent kind such as `pi`,
+  or one session). A grant to a grantee that already has a lease replaces only that lease: time, scope and use
+  count start again. The other leases stay. The 9th grantee is refused before any Touch ID prompt.
+- **A use is served by one lease.** The daemon takes only unexpired leases whose grantee matches the caller and
+  whose scope (folder, program, uses) fits. It never combines the scopes of two leases. If several fit, the most
+  specific grantee wins (session, then kind, then any), then the lease that ends first. Only that lease is spent,
+  so `--max-uses` counts for each lease on its own.
+- `lease revoke NAME` ends every lease on the secret. `--to GRANTEE` (`pi`, `any`, `session:ID`) ends one.
+  Blocking agents, turning Touch ID on, a new value, a rename and a delete still end all of them.
+- The audit log names the grantee in every lease event: grant, use, expiry, used up and revoke.
 - **Human self-lease** ("Only me + Touch ID"): after one Touch ID, the daemon keeps the key for
   `human-lease-hours` (default/max 3, 0 disables). Reuse requires a non-agent caller descending
   from the same kernel-identified terminal application or Karambit GUI (PID + start time).
@@ -141,8 +151,8 @@ karambit daemon status ; karambit daemon stop      # stop = every lease ends
 - A small per-user daemon (`karambit daemon`, auto-started, exits after 20 idle min) holds leased
   keys in RAM only. Nothing on disk; restart = all leases gone.
 - Caller identity uses capability (2) (`LOCAL_PEERTOKEN` audit token); cwd, ancestry and env inspection use (3). Agent classification still uses heuristic process/env markers.
-- Granting is human-only + one Touch ID. Folder leases cover secrets that exist at grant time only.
-- Blocking agents, turning Touch ID on, overwriting or deleting a secret ends its lease.
+- Granting is human-only + one Touch ID. Folder leases cover secrets that exist at grant time only, and replace only the same grantee's lease on each.
+- Blocking agents, turning Touch ID on, overwriting or deleting a secret ends its leases.
 - Scope: `--cwd` (agent's working dir), `--cmd` (program path pinned with its SHA-256; shells and
   command wrappers refused), `--max-uses`.
 - Interpreters (`node`, `python*`, `ruby`, `perl`, `php`, `deno`, `bun`, `java`, `osascript`, `lua`,

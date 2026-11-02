@@ -555,8 +555,8 @@ async fn lease_revoke_all() -> R<Value> {
 }
 
 #[tauri::command]
-async fn lease_revoke(names: Vec<String>) -> R<Value> {
-    Ok(json!(karambit()?.revoke_lease(&names).map_err(e)?))
+async fn lease_revoke(names: Vec<String>, to: Option<karambit_core::lease::Grantee>) -> R<Value> {
+    Ok(json!(karambit()?.revoke_lease_for(&names, to.as_ref()).map_err(e)?))
 }
 
 /// Recent audit events for one secret, newest first.

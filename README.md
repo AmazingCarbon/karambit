@@ -88,6 +88,8 @@ Detection is a heuristic: a caller that evades it is treated as a human.
   `karambit lease grant 'deploy/*' --hours 3 --cmd curl`
   Shells and bare interpreters (`node`, `python`, ...) can't be a `--cmd`, because they run any code.
   Pin the script instead: `--cmd node --script deploy.js`.
+  A secret holds one lease per agent, up to 8. A new grant to an agent replaces only that agent's lease.
+  End one with `karambit lease revoke NAME --to pi`, or all of them without `--to`.
 - **Block**: `karambit block --all` refuses all agent requests until you unblock.
   It does not stop processes, and it cannot take back a secret that a program already has.
 

@@ -443,7 +443,7 @@ mod tests {
     use super::*;
 
     fn meta(name: &str, tier: Tier, agent: bool, public: bool) -> SecretMeta {
-        SecretMeta { name: name.into(), tier, agent_allowed: agent, public, has_backup: true, created: 0, updated: 0, lease: None }
+        SecretMeta { name: name.into(), tier, agent_allowed: agent, public, has_backup: true, created: 0, updated: 0, lease: None, leases: vec![] }
     }
     fn agent(kind: &str) -> Caller {
         Caller { agent: Some(format!("env:{kind}")), kind: Some(kind.into()), ..Default::default() }
