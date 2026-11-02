@@ -486,7 +486,8 @@ function deleteButton(s) {
         ? `${display} will be removed from Karambit. ${awsMeta.get(s.name)?.sso ? "Your AWS access itself is unchanged." : "The keys themselves stay valid in AWS until they expire."}`
         : `${s.name} will be permanently removed.`,
       "This can't be undone: its offline backup copy is stored with it, so karambit recover can't bring it back.",
-      s.lease ? `${s.lease.to_label} has temporary access until ${fullTime(s.lease.expires)}; that ends now.` : null,
+      leasesOf(s).length === 1 ? `${leasesOf(s)[0].to_label} has temporary access until ${fullTime(leasesOf(s)[0].expires)}; that ends now.`
+        : leasesOf(s).length > 1 ? `${leasesOf(s).length} agents have temporary access to it; that ends now.` : null,
     ];
     if (!(await confirmDialog(aws ? "Delete AWS profile?" : "Delete secret?", lines, aws ? "Delete profile" : "Delete secret"))) return;
     try {
@@ -498,9 +499,30 @@ function deleteButton(s) {
   return del;
 }
 
+// Temporary accesses on a secret: one per agent, the soonest to end first. The daemon
+// sends them as `leases`; each has `to` as {type: "any"|"kind"|"session"|"human", value}.
+const leasesOf = (s) => s.leases || [];
+
+// Option value the Give-access select uses for the same agent.
+const granteeValue = (to) => (to.type === "any" ? "any" : to.type === "session" ? `session:${to.value}` : to.value);
+
+// Short name for a row: "pi", "Any agent", "Session 4821".
+function granteeName(to) {
+  if (to.type === "any") return "Any agent";
+  if (to.type === "human") return "You";
+  if (to.type === "session") return `Session ${String(to.value).replace(/^pid:/, "").split("@")[0]}`;
+  return to.value;
+}
+
 function leaseTag(s) {
-  return s.lease ? el("span", { class: "tag lease", textContent: `Temporary access · ${durShort(s.lease.remaining)}`,
-    title: `Given to ${s.lease.to_label} until ${fullTime(s.lease.expires)}` }) : null;
+  const all = leasesOf(s);
+  if (!all.length) return null;
+  if (all.length === 1) {
+    return el("span", { class: "tag lease", textContent: `Temporary access · ${durShort(all[0].remaining)}`,
+      title: `Given to ${all[0].to_label} until ${fullTime(all[0].expires)}` });
+  }
+  return el("span", { class: "tag lease", textContent: `Temporary access · ${all.length} agents`,
+    title: all.map((l) => `${granteeName(l.to)} until ${fullTime(l.expires)}`).join("\n") });
 }
 
 function levelBadge(s, editable = false) {
@@ -605,7 +627,7 @@ const EXPOSURE = [
   { id: "agents-touch", short: "Touch ID", label: "Agents with Touch ID", glyph: "agents-touch", test: (s) => accessOf(s) === "agents-touch" },
   { id: "me", short: "Only me", label: "Only me", glyph: "me-touch", test: (s) => accessOf(s) === "me-touch" || accessOf(s) === "me" },
   { id: "public", short: "Public", label: "Public", glyph: "public", test: (s) => accessOf(s) === "public" },
-  { id: "lease", short: "Temporary", label: "Temporary access", glyph: null, test: (s) => !!s.lease, optional: true },
+  { id: "lease", short: "Temporary", label: "Temporary access", glyph: null, test: (s) => leasesOf(s).length > 0, optional: true },
 ];
 // One short line per level for the legend (condensed from the ACCESS_LEVELS hints).
 const LEVEL_LEGEND = [
@@ -667,7 +689,7 @@ function clearExposure() {
 function searchFields(s) {
   const fields = [{ text: s.name }, { text: accessLevel(accessOf(s)).label, weight: 0.5 }];
   if (s.public) fields.push({ text: "public", weight: 0.5 });
-  if (s.lease) fields.push({ text: "temporary access lease", weight: 0.5 });
+  if (leasesOf(s).length) fields.push({ text: "temporary access lease", weight: 0.5 });
   if (isAws(s.name)) {
     const m = freshMeta(s), r = ssoRegistered[s.name], portal = r?.portal || awsPortalFor(s);
     const account = r?.account || (m && m.sso ? m.account : "");
@@ -769,7 +791,7 @@ function renderSecrets() {
   $("empty").hidden = rows.childElementCount > 0;
   $("empty-text").textContent = secrets.length ? "Nothing matches the filter." : "Your folders will live here";
   $("empty-hint").hidden = secrets.length > 0;
-  $("leases-end-all").hidden = !secrets.some((s) => s.lease);
+  $("leases-end-all").hidden = !secrets.some((s) => leasesOf(s).length);
   $("more-title").textContent = `More · ${currentFolder ? currentFolder + "/" : "Secrets"}`;
   const unbacked = secrets.filter((s) => !s.has_backup).length;
   const banner = $("backup-banner");
@@ -950,6 +972,7 @@ function eventSummary(ev) {
   if (ev.action === "run" && d.context) return d.context;
   if (ev.action === "lease") { const l = scopeLabel(d.scope); return `to ${d.to || "?"} for ${d.hours}h · ${d.expires > Date.now() / 1000 ? "until" : "ended"} ${relUntil(d.expires)}${l ? " · " + l : ""}`; }
   if (ev.action === "lease-ended") return d.why || "";
+  if (ev.action === "revoke" || ev.action === "lease-expired" || ev.action === "lease-used-up") return d.to ? `for ${d.to}` : "";
   if (ev.action === "policy") {
     const parts = [];
     if (d.tier) parts.push(`Touch ID ${d.tier === "bio" ? "on" : "off"}`);
@@ -1005,6 +1028,114 @@ function detailTargets() {
     : secrets.filter((s) => s.name.startsWith(detail.name + "/"));
 }
 
+// One secret holds at most this many temporary accesses (one per agent); the daemon enforces it.
+const MAX_LEASES_PER_SECRET = 8;
+
+// The agent chosen in the Give-access select, in the daemon's grantee shape.
+function chosenGrantee() {
+  const v = $("lease-to").value;
+  if (v === "any" || v === "") return { type: "any" };
+  return v.startsWith("session:") ? { type: "session", value: v.slice(8) } : { type: "kind", value: v };
+}
+
+// "pi", "pi and claude", "pi, claude and codex".
+const joinNames = (names) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
+
+// "Any folder" or "Only in ~/code/app", then program and use limits.
+function leaseScopeLine(sc = {}) {
+  const v = [sc.cwd ? `Only in ${sc.cwd.replace(/^\/Users\/[^/]+/, "~")}` : "Any folder"];
+  if (sc.cmds?.length) v.push(`only ${sc.cmds.map((c) => (c.path || c).split("/").pop()).join(", ")}`);
+  if (sc.max_uses) v.push(`${sc.max_uses} uses max`);
+  return v.join(" · ");
+}
+
+// "ends 01:26", with the day when it is not today.
+function endsAt(ts) {
+  const d = new Date(ts * 1000);
+  return `ends ${d.toDateString() === new Date().toDateString() ? "" : `${d.toLocaleDateString([], { weekday: "short" })} `}${clock(d.getTime())}`;
+}
+
+function clockGlyph() {
+  const g = icon(ICON_CLOCK);
+  g.setAttribute("class", "lvl-glyph lvl-lease");
+  return g;
+}
+
+// One row per agent. For a folder, an agent's row covers every item it has access to.
+function leaseRow(who, items, onEnd) {
+  const uses = items.reduce((n, l) => n + (l.uses || 0), 0);
+  const soonest = items.reduce((a, b) => (a.expires < b.expires ? a : b));
+  const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End", "aria-label": `End temporary access for ${who}` });
+  end.addEventListener("click", () => onEnd(end));
+  return el("div", { class: "lrow" },
+    el("span", { class: "gly", "aria-hidden": "true" }, clockGlyph()),
+    el("span", { class: "t2" }, el("span", { class: "mono", textContent: who }),
+      el("small", { textContent: [items.length > 1 ? `${items.length} items` : "", leaseScopeLine(items[0].scope), `used ${uses}\u00d7`, endsAt(soonest.expires)].filter(Boolean).join(" · ") })),
+    el("span", { class: "hint", textContent: `${durShort(soonest.remaining)} left` }), end);
+}
+
+function renderLeaseRows(leasable, isFolder) {
+  const byAgent = new Map(); // grantee value -> { to, leases: [lease], names: [secret] }
+  for (const s of leasable) {
+    for (const l of leasesOf(s)) {
+      const key = granteeValue(l.to);
+      if (!byAgent.has(key)) byAgent.set(key, { to: l.to, leases: [], names: [] });
+      byAgent.get(key).leases.push(l);
+      byAgent.get(key).names.push(s.name);
+    }
+  }
+  $("lease-active").hidden = byAgent.size === 0;
+  $("lease-end-all").hidden = byAgent.size === 0;
+  if (!byAgent.size) return;
+  $("lease-count").textContent = isFolder ? plural(byAgent.size, "agent") : `${byAgent.size} of ${MAX_LEASES_PER_SECRET}`;
+  const rows = [...byAgent.values()].sort((a, b) => Math.min(...a.leases.map((l) => l.expires)) - Math.min(...b.leases.map((l) => l.expires)));
+  $("lease-rows").replaceChildren(...rows.map((r) => leaseRow(granteeName(r.to), r.leases, (btn) => endLeases(r.names, r.to, btn))));
+}
+
+// Button and help for the agent chosen in the select: replace its access, add a separate one,
+// or stop when the secret already has the most. Other agents' access is never touched.
+function syncLeaseControls() {
+  if (!detail) return;
+  const items = detailTargets();
+  if (!items.length) return;
+  const isFolder = detail.kind === "folder";
+  const leasable = items.filter((s) => !s.public);
+  const chosen = chosenGrantee();
+  const key = granteeValue(chosen), name = granteeName(chosen);
+  const has = (s) => leasesOf(s).some((l) => granteeValue(l.to) === key);
+  const haveIt = leasable.filter(has);
+  const full = leasable.some((s) => !has(s) && leasesOf(s).length >= MAX_LEASES_PER_SECRET);
+  const others = [...new Set(leasable.flatMap((s) => leasesOf(s)).filter((l) => granteeValue(l.to) !== key).map((l) => granteeName(l.to)))];
+  const keep = others.length ? ` ${joinNames(others)} ${others.length > 1 ? "keep" : "keeps"} theirs.` : "";
+  const grant = $("lease-grant");
+  grant.disabled = full;
+  grant.textContent = haveIt.length ? (isFolder ? `Replace ${name}'s access on all ${leasable.length}` : `Replace ${name}'s access`)
+    : isFolder ? `Give access to all ${leasable.length}` : "Give access";
+  let help;
+  if (leasable.length === 0) {
+    help = "Public entries are always available to agents; there's nothing to give.";
+  } else if (full) {
+    help = isFolder ? `Some items here already have ${MAX_LEASES_PER_SECRET} temporary accesses. End one first.` : `This secret already has ${MAX_LEASES_PER_SECRET} temporary accesses. End one first.`;
+  } else if (isFolder) {
+    const replaces = haveIt.length ? ` Replaces ${name}'s existing access on ${plural(haveIt.length, "item")} and resets its use count; other agents keep theirs.` : others.length ? " Other agents keep their temporary access." : "";
+    help = `Lets the chosen agent use all ${leasable.length} non-public items in ${detail.name}/ without Touch ID until it ends, including ones that normally refuse agents. Covers what's in the folder now, not items added later. One Touch ID approves it.${replaces}`;
+  } else {
+    const s = items[0];
+    const relation = haveIt.length ? `Replaces ${name}'s temporary access and resets its use count.${keep}` : others.length ? `Adds a separate temporary access for ${name}.${keep}` : "";
+    const base = !s.agent_allowed
+      ? "This normally refuses agents. Temporary access lets the chosen agent use it anyway, without Touch ID, until it ends. Giving it asks for Touch ID once."
+      : s.tier === "bio"
+        ? (haveIt.length ? "Giving it asks for Touch ID once." : `Lets ${name} use this without a Touch ID prompt until it ends. Giving it asks for Touch ID once.`)
+        : "Agents can already use this without a prompt. Temporary access only records who it's for and until when; ending it doesn't block agents.";
+    help = [relation, base].filter(Boolean).join(" ");
+  }
+  $("lease-help").textContent = help;
+  $("lease-help").hidden = help === "";
+  const controlsHidden = document.querySelector("#lease-form .lease-controls").hidden;
+  $("lease-touch-note").hidden = controlsHidden || help !== ""; // the banner above already says Touch ID is asked once
+  $("lease-touch-note").textContent = "Touch ID is asked once to confirm. ";
+}
+
 async function renderDetail() {
   const d = detail;
   if (!d) return;
@@ -1026,47 +1157,19 @@ async function renderDetail() {
   }
 
 
-  // Lease state. Any non-public secret can be leased; for a folder it's every one inside.
+  // Temporary access. Any non-public secret can have it; for a folder it's every one inside.
   const leasable = items.filter((s) => !s.public);
-  const leased = leasable.filter((s) => s.lease);
-  $("lease-active").hidden = leased.length === 0;
-  if (leased.length) {
-    const soonest = leased.reduce((a, b) => (a.lease.expires < b.lease.expires ? a : b)).lease;
-    const whom = [...new Set(leased.map((s) => s.lease.to_label))].join(", ");
-    $("lease-active-text").textContent = isFolder
-      ? `${leased.length} of ${leasable.length} given to ${whom}`
-      : `Given to ${whom} · ${durShort(soonest.remaining)} left`;
-    const lim = scopeLabel(leased[0].lease.scope);
-    const uses = leased.reduce((n, s) => n + (s.lease.uses || 0), 0);
-    $("lease-active-sub").textContent = `${isFolder ? "First ends" : "Until"} ${fullTime(soonest.expires)}${lim ? ` \u00b7 ${lim}` : ""} \u00b7 used ${uses}\u00d7. Ends early if you block agents, change the value, or the Karambit daemon restarts; then the access level applies again.`;
-  }
+  renderLeaseRows(leasable, isFolder);
   const controls = document.querySelector("#lease-form .lease-controls");
   // Agents · no prompt: a grant changes nothing, so offer the real fix instead.
   const noPrompt = !isFolder && accessOf(items[0]) === "agents";
   controls.hidden = leasable.length === 0 || noPrompt;
+  $("lease-form-title").hidden = controls.hidden;
   $("lease-grant").hidden = controls.hidden;
   document.querySelector("#lease-form .lease-limits").hidden = noPrompt || leasable.length === 0;
   $("lease-require-touch").hidden = !noPrompt;
   syncDetailPrimary();
-  $("lease-grant").textContent = leased.length ? (isFolder ? "Give all again" : "Replace temporary access") : isFolder ? `Give access to all ${leasable.length}` : "Give access";
-  const cli = isFolder && leased.length ? ` Replaces ${leased.length} existing grants and resets their use counts.` : "";
-  // The banner is only for a real warning or an explanation of why there is no form. The normal
-  // Touch ID entry is covered by the sentence above plus the grey hint below, so it stays empty.
-  const help = leasable.length === 0
-    ? "Public entries are always available to agents; there's nothing to give."
-    : isFolder
-      ? `Lets the chosen agent use all ${leasable.length} non-public items in ${d.name}/ without Touch ID until it ends, including ones that normally refuse agents. Covers what's in the folder now, not items added later. One Touch ID approves it.${cli}`
-      : !items[0].agent_allowed
-        ? `This normally refuses agents. Temporary access lets the chosen agent use it anyway, without Touch ID, until it ends. Giving it asks for Touch ID once.${cli}`
-        : items[0].tier === "bio"
-          ? ""
-          : `Agents can already use this without a prompt. Temporary access only records who it's for and until when; ending it doesn't block agents.${cli}`;
-  $("lease-help").textContent = help;
-  $("lease-help").hidden = help === "";
-  $("lease-touch-note").hidden = controls.hidden || help !== ""; // warnings above already say Touch ID is asked once
-  // Touch ID entry with agents allowed: no warning banner, but keep what the grant does as a grey hint.
-  const bioAgents = !isFolder && leasable.length > 0 && items[0].agent_allowed && items[0].tier === "bio";
-  $("lease-touch-note").textContent = `${bioAgents ? "Lets the chosen agent use this without a Touch ID prompt until it ends. " : ""}Touch ID is asked once to confirm. `;
+  syncLeaseControls();
 
   // Activity: per secret, or merged across the folder.
   const names = isFolder ? items.map((s) => s.name) : [d.name];
@@ -1084,7 +1187,9 @@ async function renderDetail() {
   for (const ev of events) if (ev.session && ev.kind && !sessions.has(ev.session)) sessions.set(ev.session, ev);
   const to = $("lease-to");
   const base = ["pi", "claude", "codex", "kiro", "cursor"];
-  const kinds = [...new Set(events.filter((e) => e.kind).map((e) => e.kind))].filter((k) => !base.includes(k));
+  // Agents that already hold access are offered too, so their access can be replaced.
+  const holders = items.flatMap((s) => leasesOf(s)).filter((l) => l.to.type === "kind").map((l) => l.to.value);
+  const kinds = [...new Set([...events.filter((e) => e.kind).map((e) => e.kind), ...holders])].filter((k) => !base.includes(k));
   const typeOpts = [["any", "Any agent"], ...base.concat(kinds).map((k) => [k, `Any ${k} agent`])];
   const sessOpts = [...sessions.values()].slice(0, 6).map((e) => [`session:${e.session}`, `Only ${e.kind} ${whoLabel(e).sess} (${e.cwd ? e.cwd.split("/").slice(-1)[0] + ", " : ""}${relTime(e.ts)})`]);
   const opts = [...typeOpts, ...sessOpts];
@@ -1092,6 +1197,7 @@ async function renderDetail() {
   const optGroup = (label, list) => el("optgroup", { label }, ...list.map(([v, l]) => el("option", { value: v, textContent: l })));
   to.replaceChildren(optGroup("Agent type", typeOpts), ...(sessOpts.length ? [optGroup("Recent sessions", sessOpts)] : []));
   if (opts.some(([v]) => v === prev)) to.value = prev;
+  syncLeaseControls();
 
   renderActivity(events, isFolder);
 }
@@ -1182,10 +1288,10 @@ async function requireTouchInstead() {
   renderDetail();
 }
 
-async function revokeLease() {
-  const names = detailTargets().filter((s) => !s.public).map((s) => s.name);
+// End one agent's temporary access (`to`) or all of them (`to` null) on these secrets.
+async function endLeases(names, to, button) {
   try {
-    const r = await call("lease_revoke", { names }, $("lease-revoke"));
+    const r = await call("lease_revoke", { names, to }, button);
     toast(r.length === 1 ? "Temporary access ended" : `Ended temporary access to ${r.length} items`);
   } catch { return; }
   await loadSecrets();
@@ -2233,17 +2339,19 @@ async function loadStatusPage() {
 
 function renderLeases(leases) {
   $("status-leases-count").textContent = leases.length ? `${leases.length} active` : "";
+  // One row per agent and secret: the same secret can appear twice, and End ends only that row.
   $("status-leases").replaceChildren(...(leases.length ? leases.map((l) => {
     const meta = secrets.find((x) => x.name === l.name);
-    const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End", "aria-label": `End temporary access to ${l.name}` });
+    const who = granteeName(l.to);
+    const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End", "aria-label": `End temporary access for ${who} to ${l.name}` });
     end.addEventListener("click", async () => {
-      try { await call("lease_revoke", { names: [l.name] }, end); toast("Temporary access ended"); } catch { return; }
+      try { await call("lease_revoke", { names: [l.name], to: l.to }, end); toast("Temporary access ended"); } catch { return; }
       await loadSecrets(); loadStatusPage();
     });
     return el("div", { class: "lrow" },
       el("span", { class: "gly", "aria-hidden": "true" }, levelGlyph(meta ? accessOf(meta) : "agents-touch")),
       el("span", { class: "t2" }, el("span", { class: "mono", style: "font-size:13px", textContent: l.name }),
-        el("small", { textContent: [l.to_label, l.uses ? `used ${l.uses}×` : "", leaseScopeText(l.scope || {})].filter(Boolean).join(" · ") })),
+        el("small", { textContent: [who, `used ${l.uses || 0}×`, leaseScopeLine(l.scope || {})].join(" · ") })),
       el("span", { class: "hint", textContent: `${durShort(l.remaining)} left` }), end);
   }) : [el("div", { class: "lrow empty", textContent: "No temporary access right now." })]));
 }
@@ -2320,14 +2428,6 @@ async function explainPolicy() {
     out.replaceChildren(el("span", {}, el("b", { textContent: word }), `${by}. The secret’s own access level still applies on top.`));
     out.hidden = false;
   } catch { out.hidden = true; }
-}
-
-function leaseScopeText(sc) {
-  const v = [];
-  if (sc.cwd) v.push(`only in ${sc.cwd.replace(/^\/Users\/[^/]+/, "~")}`);
-  if (sc.cmds?.length) v.push(`only ${sc.cmds.map((c) => (c.path || c).split("/").pop()).join(", ")}`);
-  if (sc.max_uses) v.push(`${sc.max_uses} uses max`);
-  return v.join(" · ");
 }
 
 // Pills: OK green, Reachable amber, Unclear amber outline, Not checked grey.
@@ -2873,17 +2973,17 @@ function renderInspector() {
   panel.append(policyPicker(s));
   if (accessError.has(s.name)) panel.append(el("p", { class: "form-error", role: "alert", textContent: accessError.get(s.name).text }));
   if (!s.public) {
+    const held = leasesOf(s);
     panel.append(el("h3", { class: "sec", textContent: "Temporary access" }),
-      el("p", { class: "small", textContent: s.lease ? `${s.lease.to_label} · ${durShort(s.lease.remaining)} left · used ${s.lease.uses || 0} times` : "No temporary access" }),
-      // DOM append() would print a null child as the text "null"; add the hint only when there is a lease.
-      ...(s.lease ? [el("p", { class: "hint", textContent: scopeLabel(s.lease.scope) || "No program or folder limits" })] : []),
-      el("button", { class: "btn sm", textContent: s.lease ? "Change…" : "Give access…", onclick: () => { detail = { kind: "secret", name: s.name }; showDetail(); } }));
-    if (s.lease) {
-      const end = el("button", { class: "btn sm", textContent: "End", onclick: async () => {
-        try { await call("lease_revoke", { names: [s.name] }, end); await loadSecrets(); } catch { /* toast shown */ }
-      } });
-      panel.append(end);
-    }
+      ...(held.length ? held.map((l) => {
+        const who = granteeName(l.to);
+        const end = el("button", { class: "btn sm danger-ghost", textContent: "End", "aria-label": `End temporary access for ${who}`, onclick: async () => {
+          try { await call("lease_revoke", { names: [s.name], to: l.to }, end); await loadSecrets(); } catch { /* toast shown */ }
+        } });
+        return el("div", { class: "lrow" }, el("span", { class: "t2" }, el("span", { class: "mono", textContent: who }),
+          el("small", { textContent: `${durShort(l.remaining)} left · used ${l.uses || 0}× · ${scopeLabel(l.scope) || "No program or folder limits"}` })), end);
+      }) : [el("p", { class: "small", textContent: "No temporary access" })]),
+      el("button", { class: "btn sm", textContent: held.length ? "Change…" : "Give access…", onclick: () => { detail = { kind: "secret", name: s.name }; showDetail(); } }));
   }
   if (!isAws(s.name)) {
     const cmd = `karambit run -e VAR=${s.name} -- command`;
@@ -3186,7 +3286,7 @@ $("audit-secret").addEventListener("keydown", (e) => {
 });
 $("lease-grant").addEventListener("click", grantLease);
 $("leases-end-all").addEventListener("click", async () => {
-  const n = secrets.filter((s) => s.lease).length;
+  const n = secrets.filter((s) => leasesOf(s).length).length;
   if (!(await confirmDialog("End all temporary access?", `Temporary access to ${n} ${n === 1 ? "item" : "items"} ends now. Each one's access level applies again: Touch ID where it's on, refused where agents are blocked.`, "End all"))) return;
   try {
     const r = await call("lease_revoke_all", {}, $("leases-end-all"));
@@ -3194,7 +3294,11 @@ $("leases-end-all").addEventListener("click", async () => {
   } catch { /* toast shown */ }
   loadSecrets();
 });
-$("lease-revoke").addEventListener("click", revokeLease);
+$("lease-end-all").addEventListener("click", () => {
+  const names = detailTargets().filter((s) => !s.public && leasesOf(s).length).map((s) => s.name);
+  endLeases(names, null, $("lease-end-all"));
+});
+$("lease-to").addEventListener("change", syncLeaseControls);
 $("status-refresh").addEventListener("click", loadStatusPage);
 $("more-close").append(icon(ICON_CLOSE));
 $("more-close").addEventListener("click", () => { $("more-menu").open = false; $("more-menu").querySelector("summary").focus(); });

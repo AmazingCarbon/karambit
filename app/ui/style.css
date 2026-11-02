@@ -772,7 +772,9 @@ fieldset.seg input:checked + span { background: var(--accent); color: var(--on-a
 .lease-sentence strong { font-size: 16px; overflow-wrap: anywhere; white-space: normal; }
 .lease-sentence input:not([type=checkbox]) { flex: 1 1 180px; width: auto; min-width: 180px; max-width: 100%; font-size: 14px; }
 .lease-help { margin-top: 16px; line-height: 1.6; }
-#lease-active-sub { margin: 8px 0; }
+#lease-active { margin-top: var(--s5); }
+#lease-active .sh2 .sec { margin: 0; }
+#lease-active .sh-end { margin: 0 2px 0 auto; }
 
 /* Fixed shell; each column owns its scroll, not the document. */
 body { height: 100vh; }
