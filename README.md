@@ -201,7 +201,6 @@ for credentials that can outlive a Karambit grant.
 
 ## Roadmap
 
-- **Daily use.** Clearer access controls, better secret organisation, and tested upgrades and recovery.
 - **External secret engines.** Connect your own store without moving every secret into the local vault.
 - **Easier installation, if there is enough interest.** Signed and notarized macOS releases, plus Homebrew.
 
