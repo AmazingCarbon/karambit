@@ -12,28 +12,25 @@
 
 Karambit is alpha software, not independently audited, and macOS only for now.
 
-Karambit is a local-first secrets manager for you and the AI coding agents you work with. Your
-secrets are encrypted in a vault on your machine instead of sitting in `.env` files. An agent can
-run a command that uses a secret. Karambit gives the value only to the program that command starts,
-and it replaces exact copies of that value in that program's stdout and stderr with
-`[REDACTED:name]`. An agent cannot read a non-public secret with `karambit get`.
+Karambit is a local-first secrets management layer for you and your AI coding agents. Keep your
+secrets in one encrypted vault on your machine, rather than scattered across chat messages, notes
+and project files. Manage who can use each secret, grant temporary access, and revoke access from
+one place.
 
-You get a CLI (`karambit`) and a desktop app. No cloud service, no account. Any agent that can run
-shell commands can use the CLI. Karambit recognises some agents by process name or environment
-variable (for example Claude Code, Codex, pi and cursor-agent). That detection is a heuristic, so it
-is not a guarantee.
+You get a CLI (`karambit`) and a desktop app. No cloud service, no account.
+
+Agents can use secrets without you pasting the values into their prompts. Karambit passes a secret
+to the program it starts and redacts supported matches from that program's stdout and stderr.
+Any agent that can run shell commands can use the CLI. See [Security and limits](#security-and-limits)
+for what this protects and what it does not.
 
 <p align="center">
   <img src="docs/assets/screenshots/key-panel.png" alt="Karambit app: the stripe folder with its keys, access levels and temporary access tags, and the side panel of stripe/api-key" width="900">
 </p>
 
-**Platform status:** The security features are implemented for macOS only. Linux and Windows ports
-are on the [roadmap](#roadmap).
-
 > **Read this first.** A program that `karambit run` starts gets the secret value in its environment.
-> That program can read, copy or send the value.
-> Karambit keeps the value out of the agent's context. It does not make the program safe.
-> See [Security and limits](#security-and-limits).
+> That program can read, copy or send the value. Redaction does not make the program safe.
+> Blocking an agent stops new requests. It cannot take back a secret that a program already has.
 
 ## Install
 
@@ -42,67 +39,64 @@ Run `install.sh` from a plain terminal, not from an agent session.
 
 ```sh
 git clone https://github.com/AmazingCarbon/karambit && cd karambit
-./install.sh             # installs ~/.local/bin/karambit{,-se-helper} and ~/Applications/Karambit.app
+./install.sh             # installs the CLI in ~/.local/bin and the app in ~/Applications
 karambit init --paper    # makes a paper backup key
 ```
 
-To upgrade, pull and run `./install.sh` again. The installed version asks for Touch ID to trust
-the new binaries before it replaces them. The upgrade stops the daemon, which ends active leases and YOLO access.
+Write the backup key on paper and keep it somewhere safe. Karambit shows it once and asks you to
+type it again to confirm. `karambit recover` uses this key if you lose access to your Touch ID keys.
+Run `karambit backup verify` now and then to check it against your secrets.
+See [backup and recovery limits](docs/reference.md#limits-full-list) before you need them.
 
-`init --paper` shows a backup key one time. Write it on paper and type it again to confirm.
-If you lose your Touch ID keys, `karambit recover` uses this key. It refuses, changing nothing, if
-the key cannot open every secret (`--accept-loss` names any you agree to give up).
-Run `karambit backup verify` now and then: it checks the sheet against every secret, and it warns if a
-`backup rotate` was interrupted (re-run it to finish).
+To upgrade, pull and run `./install.sh` again. If the binaries change, the installed version asks
+for Touch ID to trust the new ones before it replaces them. The upgrade stops the daemon, which
+ends active temporary access, including YOLO.
 
 Builds are ad-hoc signed on your computer. They are not notarized yet.
 
 ## Quick start
 
+Store a secret, find it, and use it:
+
 ```sh
-karambit add stripe/key                      # type the value at a hidden prompt
-karambit ls                                  # names and access levels, no values
+karambit add stripe/key --access agents-touch  # type the value at a hidden prompt
+karambit ls                                   # names and access levels, no values
 karambit run -e STRIPE_KEY=stripe/key -- ./deploy.sh
-karambit get stripe/key                      # human only: copies to the clipboard
+karambit get stripe/key                       # copies to your clipboard; not for agents
 ```
 
-If the output of `./deploy.sh` contains an exact copy of the value, Karambit shows `[REDACTED:stripe/key]`.
+Replace `./deploy.sh` with the program you want to run. For supported matches in its output,
+Karambit shows `[REDACTED:stripe/key]` instead of the value. See [redaction limits](#security-and-limits).
 
-To tell your agent how to use Karambit, copy the block in [docs/agents.md](docs/agents.md) into your `AGENTS.md` or `CLAUDE.md`. The agent reads the rest with `karambit help agent`.
+To set up your agent, copy the block in [docs/agents.md](docs/agents.md) into your `AGENTS.md` or
+`CLAUDE.md`. The agent can read the command guide with `karambit help agent`.
 
 ## Access levels
 
-Each secret has one access level. You set it with `--access` or in the app.
+Each secret has one access level. Set it with `--access` or in the app.
 
 | Access level | `--access` | Agent can use it with `run` | Touch ID |
 |---|---|---|---|
 | Public (not secret) | `public` | yes, and it is not redacted | no |
 | Agents | `agents` | yes | no |
 | Agents + Touch ID | `agents-touch` | yes, after you approve | each use, or a lease |
-| Only me + Touch ID | `me-touch` | no | yes |
+| Only me + Touch ID | `me-touch` | no, except during approved folder YOLO | yes |
 
 Public and Agents secrets have no Touch ID. Any program that runs as you can read them without
-Karambit (see [limits](#security-and-limits)).
+Karambit. Use a Touch ID access level for important secrets.
 
-A caller that Karambit detects as an agent can list secrets and run commands.
-It cannot get a non-public secret, add or remove a secret, relax a policy or grant a lease.
-Detection is a heuristic: a caller that evades it is treated as a human.
+- **Temporary access (a lease).** Let an agent use a secret for a limited time. You can also limit
+  the command and number of uses. A secret holds one lease per agent, up to 8. A new grant replaces
+  only that agent's lease. See [lease commands and limits](docs/reference.md#leases-daemon).
+- **YOLO for a folder.** One Touch ID gives the chosen agent temporary access to non-public keys
+  below a folder, including Only me keys. It also covers keys added or moved there later through
+  Karambit. Stored access levels and output redaction stay unchanged. YOLO ends on expiry, End,
+  agent blocking or daemon restart—not on screen lock. The app defaults to 6 hours; the limit is
+  7 days. See [coverage and limits](docs/reference.md#yolo-for-a-folder).
+- **Block.** `karambit block --all` refuses new agent requests until you unblock. It does not stop
+  running programs or take back secrets they already have.
 
-- **Lease**: temporary access for an agent. You limit it by time, folder, command and number of uses.
-  `karambit lease grant 'deploy/*' --hours 3 --cmd curl`
-  Shells and bare interpreters (`node`, `python`, ...) can't be a `--cmd`, because they run any code.
-  Pin the script instead: `--cmd node --script deploy.js`.
-  A secret holds one lease per agent, up to 8. A new grant to an agent replaces only that agent's lease.
-  End one with `karambit lease revoke NAME --to pi`, or all of them without `--to`.
-- **YOLO for a folder**: one Touch ID gives the chosen agent temporary access to every non-public key
-  below a folder, including Only me keys and keys added or moved there later through Karambit.
-  `karambit yolo start deploy --to pi --hours 6`
-  Keys keep their access level at rest. YOLO never makes a key Public or turns redaction off.
-  It ends at its end time, on End, when agents are blocked, or on daemon restart, not on screen lock.
-  Use `karambit yolo ls`, `karambit yolo end deploy --to pi`, or the app's red YOLO controls.
-  The app defaults to 6 hours; the limit is 7 days. See [coverage and limits](docs/reference.md#yolo-for-a-folder).
-- **Block**: `karambit block --all` refuses all agent requests until you unblock.
-  It does not stop processes, and it cannot take back a secret that a program already has.
+These rules depend on agent detection, which is not a guarantee. See [Security and limits](#security-and-limits).
 
 ## The desktop app
 
@@ -115,136 +109,108 @@ The same vault as the CLI, with secrets masked. The screenshot above uses sample
 
 ## Common tasks
 
+**Keep secrets in order.**
+Use names such as `stripe/key` or `deploy/token` to group secrets into folders. Rename a key or move
+a folder without copying the values by hand:
+
+```sh
+karambit mv stripe/key payments/stripe
+karambit mv deploy/ production/
+```
+
+A move keeps the value and access level, asks for Touch ID, and ends temporary access on the old
+names. Update scripts that use those names. You can also edit names, values and access in the app.
+Karambit does not find or remove old copies from chats, notes or other files.
+
+**Choose who can use a secret.**
+Change its access level, give an agent temporary access, or end that access:
+
+```sh
+karambit policy payments/stripe --access agents-touch
+karambit lease grant payments/stripe --to pi --hours 1 --cmd curl
+karambit lease revoke payments/stripe --to pi
+```
+
+A command limit is not a sandbox. For scripts, use a script pin rather than a bare interpreter.
+See [lease commands and limits](docs/reference.md#leases-daemon).
+
+**Use AWS without copying keys into your shell.**
+Store access keys or sign in with IAM Identity Center (SSO), then run:
+
+```sh
+karambit aws PROFILE -- aws s3 ls
+```
+
+The AWS CLI and SDKs get credentials through a local endpoint, not as AWS keys in the environment.
+The program still receives the credentials. This applies to `karambit aws` and `karambit run --aws`,
+not plain `run -e`. See [AWS setup, SSO and role import](docs/aws.md).
+
 **Move a project's `.env` files into the vault.**
-`karambit secure` (alias: `karambit eat`) stores each secret and writes a `.env.schema` file with no values.
-It also adds `karambit run --` to the `dev`, `start`, `serve`, `test`, `build` and `preview` npm scripts, so `npm run dev` works as before.
-`karambit secure rebuild` puts the original files back. Details: [docs/secure.md](docs/secure.md).
+`karambit secure` (alias: `karambit eat`) stores each secret and writes a `.env.schema` with no values.
+It also adds `karambit run --` to supported npm scripts, so you can keep using commands such as
+`npm run dev`.
 
 ```sh
 karambit secure --dry-run    # shows names only; agents can run this
 karambit eat                 # same as karambit secure
 ```
 
-**Use AWS.**
-Karambit keeps AWS access keys or an IAM Identity Center (SSO) sign-in.
-With `karambit aws PROFILE` or `karambit run --aws`, the AWS CLI and SDKs get credentials through a
-local endpoint (`AWS_CONTAINER_CREDENTIALS_FULL_URI`), not as AWS keys in the environment. Plain
-`run -e` with AWS variables is not covered by this.
-You can import all roles from an SSO portal. Details: [docs/aws.md](docs/aws.md).
+`karambit secure rebuild` puts the original files back. See [supported files, scripts and limits](docs/secure.md).
 
-```sh
-karambit sso portal add main --start-url https://acme.awsapps.com/start --region us-west-2
-karambit login main
-karambit aws import --portal main --dry-run   # imported names are <account id>-<role>
-karambit aws import --portal main
-karambit aws 111111111111-readonly -- aws s3 ls
-```
-
-**Read a CI build status with a fixed call.**
-`karambit call ci-status JOB` makes one fixed CI build-status request (Jenkins-compatible API) for the
-last build status, using a credential from the vault. Only fixed calls exist today; this is not a general broker.
-See [docs/reference.md](docs/reference.md#fixed-tool-calls-mode-c).
+For the fixed CI build-status request, see [fixed tool calls](docs/reference.md#fixed-tool-calls-mode-c).
+This is not a general API broker.
 
 ## Security and limits
 
-What Karambit does:
+Karambit encrypts each secret with its own key (ChaCha20-Poly1305). Secure Enclave keys that cannot
+be exported wrap those keys. Touch ID protects unwraps where required; approved temporary access
+can allow use without another prompt. A paper backup key provides a separate recovery path.
 
-- It encrypts each secret with its own key (ChaCha20-Poly1305).
-  On macOS, Secure Enclave keys that you cannot export wrap these keys. Public and Agents secrets need no
-  Touch ID, so any program that runs as you can read them (see below).
-- It asks for Touch ID for secrets that need it. The Secure Enclave enforces this for unwraps that go
-  through the helper. The exception is an "Only me + Touch ID" secret while a human self-lease is active.
-- It gets the caller's identity from the kernel (process ancestry and audit token).
-  This identifies the process, not whether a human started it.
-  The CLI also checks the daemon before it sends anything: the process on the socket must run a pinned `karambit` that was not started with `DYLD_*` variables, and the run folder and socket must be yours and not writable by others.
-  The daemon itself refuses to start with a `DYLD_*` variable set.
-  Until the vault is set up, this check is skipped; once it is, a missing daemon pin is a refusal.
-- `karambit run` starts the command through a pinned launcher.
-  Each launch is used one time and is bound to the command, its arguments and its folder.
-- It writes an audit entry for each action, on a best-effort basis, to a hash-chained log.
-- It keeps an offline [age](https://age-encryption.org) copy of the keys for paper-key recovery.
+The installer uses the macOS hardened runtime to block debugger attachment and `DYLD_*` injection
+into the signed binaries. This does not protect every file or process that runs as you.
 
-What Karambit does not do:
+Keep these limits in mind:
 
-- **The launched program has the secret value.** For AWS profiles, it has the credentials, which it
-  fetches from a local endpoint rather than from the environment.
-  While it runs, other processes of the same user can read its environment (for example `ps -E`).
+- **The program gets the secret.** It can copy or send it. Other processes that run as you can read
+  its environment. End access or block an agent to stop future requests, not to recall released values.
 - **Redaction is not a sandbox.** It removes exact copies of non-public values of at least 4 bytes,
-  and 16-byte fragments of values of 32 bytes or more, from stdout and stderr. Public values are never redacted.
-  It does not catch encoded copies (base64, hex, URL encoding), files the program writes, network traffic,
-  or values the program fetches on its own (for example from Secrets Manager).
-- **Your environment reaches the program.** The program inherits your shell's variables, so a variable
-  that makes it load code (`NODE_OPTIONS`, `PYTHONPATH`, `DYLD_*`, ...) runs inside it with the secret in reach.
-  When the caller is an agent, Karambit drops those variables (and says which); you can let some through with
-  `karambit config allow-env NAME,...` (human + Touch ID). Your own runs keep them. A `.env.schema` can never set them as plain values.
-- **A script lease pins argv[1] only.** `--cmd node --script deploy.js` checks the interpreter, the script file
-  and that there is no `-e`/`-c`/`-m` style flag. It does not hash modules the script imports or its config.
-- **Policy rules need a current daemon.** A daemon from an older build ignores the `policy` section.
-  `karambit policy test FILE --live` fails if the running daemon does not report the same policy.
-- **Agent detection is a heuristic.** Karambit uses process names and environment markers.
-  A process that double-forks and clears its environment can look like a human.
-  Use a Touch ID access level for important secrets: Touch ID is the backstop.
-- **`ssh localhost` looks like a human, so Karambit refuses it.**
-  If macOS Remote Login is on, a program that adds a key to `~/.ssh/authorized_keys` can run `ssh localhost karambit ...`.
-  That process chain starts at `sshd` and has no agent in it.
-  Karambit marks callers that come through `sshd` (or have `SSH_CONNECTION`/`SSH_TTY` set) as remote, writes `remote` in the audit log,
-  and refuses human-only commands from them unless `karambit config allow-ssh-human on` (a human, with Touch ID).
-  The same goes for runs: over SSH, `karambit run` and `karambit get` refuse an Only-me secret (the Touch ID prompt would be answered by nobody at the keyboard)
-  and never reuse a cached approval. Secrets that agents may use are still reachable that way, and the SSH_* check is a name check a program can clear.
-  Keep Remote Login off; `karambit doctor` warns when it is on.
-- **A long-term AWS key lets a program mint its own sessions.**
-  A program holding an IAM-user key can call `sts get-session-token` and keep the result for up to 36 hours.
-  `karambit aws add NAME --session-mint` (or `karambit aws session-mint NAME on`) makes the daemon trade the key for a one-hour session and give the program only that.
-  It is off by default. The program can no longer see the key, but a session it was given still cannot be recalled before it expires.
-  The exchange uses only an `aws` CLI at `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin` (owned by you or root, not group/world-writable), never one found on `PATH`,
-  and runs it with an empty environment and an empty `HOME`. If the `aws` CLI is elsewhere, `session-mint` runs are refused.
-- **No-prompt secrets are readable by any program that runs as you.** Treat Public and Agents secrets that way.
-- **The audit log is not tamper-proof.** The hash chain has no key.
-  A process of the same user can rewrite the whole chain, and `audit --verify` still passes.
-  The log rotates at 16 MB into `audit-<time>.jsonl` segments that keep the chain; you may archive or
-  delete old segments (`audit --verify` then says the older part was removed).
-- **Typed credentials in a command line are masked in the audit log only on a best-effort basis.**
-  Values of secrets released in that launch, and obvious `--password`/`--token`/`Authorization:`/URL-password
-  patterns (the whole argument after a secret flag, spaces included), are replaced by `[REDACTED]`; a password in an unusual form can still be recorded.
-  The log keeps `argv_sha256` of the real command. Pass secrets with `-e`, not as arguments.
-- `install.sh` signs the binaries with the hardened runtime (ad-hoc, no Apple account), so the kernel refuses a
-  same-user debugger attach and `DYLD_*` injection. There is no memory locking yet, and a process that runs as you can
-  still replace the binaries (the next point).
-  Config, the helper pin and the installed binaries are writable by your user.
-- **`package.json` scripts are pinned only for agents.** Trusting a `.env.schema` also pins the
-  sibling `package.json` `scripts`. If they change, agents are refused (`profile.untrusted`).
-  A `package.json` that is a FIFO or other non-regular file is pinned as `nonregular` and never read.
-  You get a warning, so read the Touch ID prompt's command line and check `git diff package.json`.
-- **Very large environments are refused.** `karambit run` estimates the size of local secrets,
-  arguments and your environment before any prompt and refuses what the 1 MB launch frame or the system's
-  argument limit cannot take. Linked-source (backend) values are only sized at release, so those can
-  still fail late. Keep big values in a file the program reads.
-- `run --jail` (a macOS sandbox) is experimental. Do not use it as a security boundary.
-
-If your agent harness has a filesystem sandbox, deny the agent writes to Karambit's files:
-see [Run the agent in a sandbox](docs/agents.md#run-the-agent-in-a-sandbox).
+  and 16-byte fragments of values of 32 bytes or more, from stdout and stderr. It does not cover
+  encoded values, files or network traffic. Public values are not redacted. `run --jail` is experimental;
+  do not treat it as a security boundary.
+- **Agent detection can be bypassed.** Karambit uses process ancestry, names and environment markers.
+  A caller it detects as an agent cannot get a non-public secret, add or remove secrets, relax a policy
+  or grant access. A caller that evades detection can look like a human. Use Touch ID for important secrets.
+- **No-prompt secrets are readable by programs that run as you.** Encryption at rest does not make
+  the Public and Agents levels a barrier against those programs.
+- **Your account can change Karambit's files.** Config, trust pins and installed binaries are writable
+  by your user. If your agent has a filesystem sandbox, [deny writes to these files](docs/agents.md#run-the-agent-in-a-sandbox).
+  Keep macOS Remote Login off unless you need it; see the [same-user and SSH limits](docs/threat-model.md#4-same-user-limits).
+- **Trust the code you run.** A script pin does not cover its imports or config. Karambit drops
+  code-loading environment variables for detected agents, but human runs keep them. See the
+  [full limits](docs/reference.md#limits-full-list) before you allow exceptions.
+- **Audit is best effort, not tamper-proof.** A process that runs as you can rewrite the log.
+  Pass secrets through `-e`, not as command-line values; audit masking cannot catch every form.
 
 Run `karambit doctor --agent-env` from a plain shell and from inside your agent, then compare.
-It checks a few things from that environment, for that run only. A pass is not a safety guarantee.
+It checks that environment for that run only. A pass is not a safety guarantee.
 
-Full analysis: [docs/threat-model.md](docs/threat-model.md).
-How it works, with diagrams: [docs/how-it-works.html](docs/how-it-works.html).
+For details, read the [threat model](docs/threat-model.md) and [full limits](docs/reference.md#limits-full-list).
+These cover trust pins, SSH, environment handling, recovery and more.
+See [how it works](docs/how-it-works.html) for diagrams, and [AWS session limits](docs/aws.md)
+for credentials that can outlive a Karambit grant.
 
 ## Roadmap
 
 - [ ] **Proxy mode for API keys.** The program gets a placeholder value.
       Karambit adds the real key only on requests to a fixed host.
-- [ ] **Daemon hardening.** Memory locking, core-dump protection, anti-debug.
+- [ ] **More daemon hardening.** Memory locking and core-dump protection. Hardened-runtime signing is already in the installer.
 - [ ] **Signed and notarized releases**, and a Homebrew install.
-- [ ] **Linux port** (platform): TPM2 keys, fprintd or polkit for presence,
-      `SO_PEERCRED`/pidfd for caller identity, a systemd user service.
-      The core and the CLI compile for Linux today. The security features are not implemented there yet.
+- [ ] **Linux port.** The core and CLI compile for Linux today, but the security features are not implemented there yet.
 - [ ] **MCP server**, so agents can call Karambit as a tool.
 - [ ] **`.env` import in the desktop app.**
-- [ ] **Windows port** (platform): TPM/CNG keys and Windows Hello.
+- [ ] **Windows port.**
 
-Linked sources are a backend interface ([docs/backend-contract.md](docs/backend-contract.md)).
-This build has no built-in backends.
+Linked sources are a [backend interface](docs/backend-contract.md). This build has no built-in backends.
 
 ## Documentation
 
@@ -267,10 +233,13 @@ se-helper/    Swift: Secure Enclave keys and Touch ID (macOS)
 app/          Tauri desktop app (plain HTML/JS)
 ```
 
+Test the code you change with a test-name filter. For example:
+
 ```sh
-cargo test    # software keys only: no Secure Enclave or Touch ID needed
+RUST_TEST_THREADS=4 cargo test -p karambit-core --lib lease
 ```
 
+These tests use software keys; no Secure Enclave or Touch ID is needed.
 Open an issue before a large change, and read [CONTRIBUTING.md](CONTRIBUTING.md) first. Report security
 problems privately, as described in [SECURITY.md](SECURITY.md), not in a public issue.
 
