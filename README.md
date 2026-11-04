@@ -12,11 +12,14 @@
 
 Karambit is alpha software, not independently audited, and macOS only for now.
 
-Karambit is a local-first secrets manager for you and the AI coding agents you work with. Your
-secrets are encrypted in a vault on your machine instead of sitting in `.env` files. An agent can
-run a command that uses a secret. Karambit gives the value only to the program that command starts,
-and it replaces exact copies of that value in that program's stdout and stderr with
-`[REDACTED:name]`. An agent cannot read a non-public secret with `karambit get`.
+Karambit is a local-first secrets management layer for you and your AI coding agents. Keep your
+secrets in one encrypted vault on your machine, rather than scattered across chat messages, notes
+and project files. Manage who can use each secret, grant temporary access, and revoke access from
+one place.
+
+Agents can run commands that use secrets without putting the values in their context. Karambit
+passes a secret to the program it starts and redacts exact copies from that program's stdout and
+stderr. An agent cannot read a non-public secret with `karambit get`.
 
 You get a CLI (`karambit`) and a desktop app. No cloud service, no account. Any agent that can run
 shell commands can use the CLI. Karambit recognises some agents by process name or environment
