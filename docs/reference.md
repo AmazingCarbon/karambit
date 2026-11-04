@@ -2,6 +2,16 @@
 
 Detailed behaviour behind the [README](../README.md). The security analysis is in [threat-model.md](threat-model.md).
 
+## App layout and motion
+
+The Secrets view keeps access labels at full size when a key's side panel opens.
+Above 900 px, rows and filters wrap. At 900 px and below, the panel overlays the list.
+The AWS view keeps its compact rows.
+
+Dialogs, section changes, folder navigation, menus and panels use short transitions.
+New temporary access rows fade in; background refresh does not replay existing row or panel entrances.
+The macOS Reduce Motion preference disables these transitions and animations.
+
 ## Commands
 
 
