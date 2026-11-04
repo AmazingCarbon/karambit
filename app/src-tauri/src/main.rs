@@ -539,6 +539,25 @@ async fn sso_open_browser(state: tauri::State<'_, SignIn>) -> R<Value> {
 }
 
 #[tauri::command]
+async fn yolo_start(path: String, to: String, hours: f64) -> R<Value> {
+    let to = karambit_core::lease::Grantee::parse(&to).map_err(e)?;
+    Ok(json!(karambit()?.yolo_start(&path, &to, hours).map_err(e)?))
+}
+
+#[tauri::command]
+async fn yolo_end(path: String, to: Option<karambit_core::lease::Grantee>) -> R<Value> {
+    karambit()?.yolo_end(&path, to.as_ref()).map_err(e)?;
+    Ok(json!({"ok": true}))
+}
+
+#[tauri::command]
+async fn yolo_list() -> R<Value> {
+    let mut folders: std::collections::BTreeMap<String, Vec<karambit_core::daemon::YoloView>> = Default::default();
+    for y in karambit()?.yolos() { folders.entry(y.path.clone()).or_default().push(y); }
+    Ok(json!(folders))
+}
+
+#[tauri::command]
 async fn lease_grant(names: Vec<String>, to: String, hours: f64, cwd: Option<String>, cmds: Option<Vec<String>>, max_uses: Option<u32>) -> R<Value> {
     let g = karambit_core::lease::Grantee::parse(&to).map_err(e)?;
     let scope = karambit_core::daemon::Scope {
@@ -551,7 +570,11 @@ async fn lease_grant(names: Vec<String>, to: String, hours: f64, cwd: Option<Str
 
 #[tauri::command]
 async fn lease_revoke_all() -> R<Value> {
-    Ok(json!(karambit()?.revoke_lease(&["*".to_string()]).unwrap_or_default()))
+    let v = karambit()?;
+    let mut ended = v.revoke_lease(&["*".to_string()]).map_err(e)?;
+    let folders: std::collections::BTreeSet<_> = v.yolos().into_iter().map(|y| y.path).collect();
+    for path in folders { v.yolo_end(&path, None).map_err(e)?; ended.push(format!("{path}/")); }
+    Ok(json!(ended))
 }
 
 #[tauri::command]
@@ -656,7 +679,7 @@ fn main() {
         .manage(Paper::default())
         .invoke_handler(tauri::generate_handler![
             status, status_full, doctor, aws_whoami, policy_explain, profile_preview, profile_trust, profile_list, init, list, add, block_agents, paper_new, paper_confirm, paper_cancel, backup_verify, paper_check_row, recover, set_policy, rename, remove, copy_secret, audit, get_config, set_config, agents_discover, aws_add, aws_show,
-            lease_grant, lease_revoke, lease_revoke_all, activity, public_values, keys_upgrade, aws_add_sso, sso_discover, aws_import_sso, sso_status, sso_logout, sso_portal_add,
+            yolo_start, yolo_end, yolo_list, lease_grant, lease_revoke, lease_revoke_all, activity, public_values, keys_upgrade, aws_add_sso, sso_discover, aws_import_sso, sso_status, sso_logout, sso_portal_add,
             sso_portal_remove, sso_portal_limit, sso_login, sso_login_cancel, sso_open_browser,
             source_kinds, source_list, source_add, source_retarget, source_remove, classify_reference
         ])

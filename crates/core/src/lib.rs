@@ -494,6 +494,7 @@ impl Karambit {
             if existing.is_some() {
                 self.end_leases_internal(std::slice::from_ref(&f.name), "value replaced", &dispatch);
             }
+            dispatch(daemon::Req::YoloEnroll { file: f.clone(), dek: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, dek.as_ref()), added: existing.is_none() })?;
             Ok(SecretMeta::from(&f))
         })
     }
@@ -760,6 +761,23 @@ impl Karambit {
         })
     }
 
+    /// Start one RAM-only folder access. Replaces only this folder and grantee.
+    pub fn yolo_start(&self, path: &str, to: &lease::Grantee, hours: f64) -> Result<Vec<daemon::YoloView>> {
+        self.require_human(fence::Verb::LeaseGrant, fence::Layer::Cli)?;
+        let r = daemon::request(&self.paths, &daemon::Req::YoloStart { path: path.into(), grantee: to.clone(), hours })?;
+        Ok(serde_json::from_value(r["yolos"].clone())?)
+    }
+
+    pub fn yolo_end(&self, path: &str, to: Option<&lease::Grantee>) -> Result<()> {
+        daemon::request(&self.paths, &daemon::Req::YoloEnd { path: path.into(), grantee: to.cloned() })?;
+        Ok(())
+    }
+
+    pub fn yolos(&self) -> Vec<daemon::YoloView> {
+        daemon::request_if_running(&self.paths, &daemon::Req::YoloList)
+            .and_then(|r| serde_json::from_value(r["yolos"].clone()).ok()).unwrap_or_default()
+    }
+
     /// End leases early. Agents may revoke (it only tightens); never prompts.
     pub fn revoke_lease(&self, patterns: &[String]) -> Result<Vec<String>> {
         self.revoke_lease_for(patterns, None)
@@ -794,6 +812,7 @@ impl Karambit {
         if names.is_empty() {
             return;
         }
+        let _ = dispatch(daemon::Req::YoloForget { names: names.to_vec() });
         if let Ok(r) = dispatch(daemon::Req::Revoke { patterns: names.to_vec(), grantee: None }) {
             let hit: Vec<String> = serde_json::from_value(r["revoked"].clone()).unwrap_or_default();
             if !hit.is_empty() {
@@ -1031,6 +1050,9 @@ impl Karambit {
                 store::remove_secret(&self.paths, n)?;
             }
             self.end_leases_internal(&old, "renamed", &dispatch);
+            for (file, dek) in built.into_iter().zip(deks) {
+                dispatch(daemon::Req::YoloEnroll { file, dek: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, dek.as_ref()), added: false })?;
+            }
             Ok(old.iter().cloned().zip(new.iter().cloned()).collect())
         })
     }

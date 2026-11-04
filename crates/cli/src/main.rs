@@ -300,6 +300,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: LeaseCmd,
     },
+    /// Start, end or list RAM-only folder YOLO access.
+    Yolo {
+        #[command(subcommand)]
+        cmd: YoloCmd,
+    },
     /// Recover secrets using your offline backup identity.
     #[command(long_about = "Recovery: move dead SE keys aside, create new ones, rewrap all secrets from the offline backup identity. Omit FILE to type the paper key. Refuses, changing nothing, unless the key opens every secret; --accept-loss NAME[,NAME] gives up exactly the secrets it lists as unrecoverable. An interrupted recovery is finished by running it again.")]
     Recover {
@@ -475,6 +480,24 @@ enum DaemonCmd {
     Status,
     /// Stop it now (ends every lease).
     Stop,
+}
+
+#[derive(Subcommand)]
+enum YoloCmd {
+    /// Let an agent use all non-public keys below FOLDER, including keys added later.
+    Start {
+        folder: String,
+        #[arg(long)]
+        to: String,
+        /// Duration in hours, at most 168 (7 days). Requires one Touch ID.
+        #[arg(long)]
+        hours: f64,
+    },
+    /// End all YOLO access on FOLDER, or only the selected grantee's.
+    End { folder: String, #[arg(long)] to: Option<String> },
+    /// List active YOLO access. Use --json for machine-readable output.
+    #[command(name = "ls", alias = "list")]
+    List,
 }
 
 #[derive(Subcommand)]
@@ -1193,7 +1216,8 @@ fn command_verb(cmd: &Cmd) -> Option<Verb> {
         Cmd::Run { .. } => None,
         Cmd::Rm { .. } => Some(Verb::Rm),
         Cmd::Mv { .. } => Some(Verb::Rename),
-        Cmd::Lease { cmd: LeaseCmd::Grant { .. } } => Some(Verb::LeaseGrant),
+        Cmd::Lease { cmd: LeaseCmd::Grant { .. } } | Cmd::Yolo { cmd: YoloCmd::Start { .. } } => Some(Verb::LeaseGrant),
+        Cmd::Yolo { cmd: YoloCmd::End { .. } | YoloCmd::List } => None,
         Cmd::Lease { cmd: LeaseCmd::List | LeaseCmd::Revoke { .. } } => None,
         Cmd::Recover { .. } => Some(Verb::Recover),
         Cmd::Helper { cmd: HelperCmd::Pin { .. } } => Some(Verb::HelperPin),
@@ -1282,8 +1306,12 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
             if cli.json { print_json(&r) } else { println!("initialized {}", v.paths.root.display()) }
         }
         Cmd::Status => {
-            let st = v.status()?;
-            if cli.json { print_json(&st) } else { print_status(&st) }
+            let mut st = v.status()?;
+            st["yolos"] = json!(v.yolos());
+            if cli.json { print_json(&st) } else {
+                print_status(&st);
+                for y in v.yolos() { println!("YOLO: {}/ · {} · {} left", y.path, y.to_label, dur(y.remaining)); }
+            }
         }
         Cmd::Add { name, access, touch, human_only, public, force } => {
             let (touch, agent_allowed, public) = match access {
@@ -1412,6 +1440,23 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
                 }
             }
         }
+        Cmd::Yolo { cmd: YoloCmd::Start { folder, to, hours } } => {
+            let to = karambit_core::lease::Grantee::parse(&to)?;
+            let got = v.yolo_start(&folder, &to, hours)?;
+            if cli.json { print_json(&json!(got)); }
+            else { println!("YOLO is on for {folder}/ to {}", to.label()); }
+        }
+        Cmd::Yolo { cmd: YoloCmd::End { folder, to } } => {
+            let to = to.as_deref().map(karambit_core::lease::Grantee::parse).transpose()?;
+            v.yolo_end(&folder, to.as_ref())?;
+            println!("YOLO ended for {folder}/");
+        }
+        Cmd::Yolo { cmd: YoloCmd::List } => {
+            let ys = v.yolos();
+            if cli.json { print_json(&json!(ys)); }
+            else if ys.is_empty() { println!("no active YOLO access"); }
+            else { for y in ys { println!("{}/  YOLO  {}  {} left", y.path, y.to_label, dur(y.remaining)); } }
+        }
         Cmd::Lease { cmd: LeaseCmd::Grant { patterns, hours, to, cwd, cmd, script, max_uses } } => {
             let g = karambit_core::lease::Grantee::parse(&to)?;
             let cmds = karambit_core::lease::command_bindings(&cmd, &script, &std::env::current_dir()?)?;
@@ -1431,7 +1476,8 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
             } else {
                 for l in ls {
                     let sc = if l.scope.is_empty() { String::new() } else { format!("  [{}]", l.scope.label()) };
-                    println!("{:<32} {:<20} {} left, used {}x{sc}", l.info.name, l.info.to_label, dur(l.info.remaining), l.uses);
+                    if l.yolo { println!("{:<32} YOLO  {:<20} {} left", l.info.name, l.info.to_label, dur(l.info.remaining)); }
+                    else { println!("{:<32} {:<20} {} left, used {}x{sc}", l.info.name, l.info.to_label, dur(l.info.remaining), l.uses); }
                 }
             }
         }
@@ -2047,6 +2093,20 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     #[test]
+    fn yolo_cli_requires_explicit_grantee_and_duration() {
+        for args in [vec!["yolo", "start", "stripe"], vec!["yolo", "start", "stripe", "--to", "pi"], vec!["yolo", "start", "stripe", "--hours", "6"]] {
+            assert!(Cli::try_parse_from([vec!["karambit"], args].concat()).is_err());
+        }
+        let parsed = Cli::try_parse_from(["karambit", "yolo", "start", "stripe", "--to", "pi", "--hours", "6"]).unwrap();
+        assert!(matches!(parsed.cmd, Cmd::Yolo { cmd: YoloCmd::Start { hours: 6.0, .. } }));
+        assert!(Cli::try_parse_from(["karambit", "yolo", "ls", "--json"]).unwrap().json);
+        for args in [vec!["yolo", "ls"], vec!["yolo", "end", "stripe"], vec!["yolo", "end", "stripe", "--to", "pi"]] {
+            let parsed = Cli::try_parse_from([vec!["karambit"], args].concat()).unwrap();
+            assert!(command_verb(&parsed.cmd).is_none());
+        }
+    }
+
+    #[test]
     fn lease_grant_script_flag_and_script_path_suggestion() {
         let grant = |args: &[&str]| match Cli::try_parse_from([&["karambit", "lease", "grant", "a/b"], args].concat()).map(|c| c.cmd) {
             Ok(Cmd::Lease { cmd: LeaseCmd::Grant { cmd, script, .. } }) => (cmd, script),
@@ -2146,6 +2206,7 @@ mod tests {
             (Verb::Get, vec!["get", "test/bio"]),
             (Verb::Get, vec!["get", "test/bio", "--stdout"]),
             (Verb::LeaseGrant, vec!["lease", "grant", "test/bio"]),
+            (Verb::LeaseGrant, vec!["yolo", "start", "test", "--to", "pi", "--hours", "6"]),
             (Verb::KeysUpgrade, vec!["keys", "upgrade"]),
             (Verb::HelperPin, vec!["helper", "pin"]),
             (Verb::Recover, vec!["recover"]),
