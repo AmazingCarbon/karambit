@@ -217,7 +217,13 @@ Other limits, same source, all open in release 0.1.0:
   (`lib.rs:626-629,733`).
 - **Lease and SSO state live in daemon RAM.** This is good for persistence (nothing on disk)
   but the daemon is a same-user process (`daemon.rs`, peer identity via `LOCAL_PEERTOKEN`).
-- **Ad-hoc signed, not notarized.** There is no code-signature check on callers.
+- **Ad-hoc signed, not notarized.** There is no code-signature check on callers. `install.sh`
+  signs the CLI, the helper and the app with the hardened runtime (`codesign -s - -o runtime`,
+  no `get-task-allow`): on macOS 26 a same-user `lldb` attach to the daemon is refused and
+  `DYLD_INSERT_LIBRARIES` is ignored (tested). Builds that are not installed through
+  `install.sh` (for example `cargo build`) are not hardened. This does not stop a same-user
+  process from replacing the binaries or editing the pins (above), and it does not protect the
+  key files (#6).
 
 ## 5. What a lease, a revoke or a logout does not do
 

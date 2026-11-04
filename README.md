@@ -4,7 +4,7 @@
 
 <h1 align="center">Karambit</h1>
 
-<p align="center"><strong>Your agent shouldn't eat your secrets. Karambit eats them first.</strong></p>
+<p align="center"><strong>Hassle-free secret manager for you and your agents.</strong></p>
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
@@ -222,7 +222,9 @@ What Karambit does not do:
   Values of secrets released in that launch, and obvious `--password`/`--token`/`Authorization:`/URL-password
   patterns (the whole argument after a secret flag, spaces included), are replaced by `[REDACTED]`; a password in an unusual form can still be recorded.
   The log keeps `argv_sha256` of the real command. Pass secrets with `-e`, not as arguments.
-- No memory locking, core-dump protection or anti-debug yet.
+- `install.sh` signs the binaries with the hardened runtime (ad-hoc, no Apple account), so the kernel refuses a
+  same-user debugger attach and `DYLD_*` injection. There is no memory locking yet, and a process that runs as you can
+  still replace the binaries (the next point).
   Config, the helper pin and the installed binaries are writable by your user.
 - **`package.json` scripts are pinned only for agents.** Trusting a `.env.schema` also pins the
   sibling `package.json` `scripts`. If they change, agents are refused (`profile.untrusted`).
@@ -233,6 +235,9 @@ What Karambit does not do:
   argument limit cannot take. Linked-source (backend) values are only sized at release, so those can
   still fail late. Keep big values in a file the program reads.
 - `run --jail` (a macOS sandbox) is experimental. Do not use it as a security boundary.
+
+If your agent harness has a filesystem sandbox, deny the agent writes to Karambit's files:
+see [Run the agent in a sandbox](docs/agents.md#run-the-agent-in-a-sandbox).
 
 Run `karambit doctor --agent-env` from a plain shell and from inside your agent, then compare.
 It checks a few things from that environment, for that run only. A pass is not a safety guarantee.
