@@ -170,6 +170,53 @@ karambit daemon status ; karambit daemon stop      # stop = every lease ends
 - The SE helper binary is pinned by SHA-256; after a reinstall run `karambit helper pin` (install.sh does it).
 
 
+## YOLO for a folder
+
+```sh
+karambit yolo start stripe --to claude --hours 6
+karambit yolo start stripe --to pi --hours 24
+karambit yolo ls --json
+karambit yolo end stripe --to claude   # end only this folder and grantee
+karambit yolo end stripe               # end every YOLO on this folder
+```
+
+YOLO is temporary agent access to a folder's whole subtree, including **Only me · Touch ID** keys.
+Starting it is human-only and requires **one Touch ID**. The approval names the folder, grantee,
+duration, Only me keys and keys added later. `--to` and `--hours` are required in the CLI.
+Grantees follow `lease grant`: `any`, an agent kind such as `claude` or `pi`, or `session:ID`.
+The app's **YOLO for agents** dialog defaults to 6 hours and offers up to 7 days (168 hours).
+YOLO does not apply to `aws/` or `sources/`.
+
+- Each `(folder, grantee)` has one RAM-only record. Starting it again replaces only that record,
+  with one new Touch ID. Other agents and per-key temporary accesses keep theirs.
+- Every non-public key below the folder is covered at start. Public keys stay unchanged.
+  Keys keep their encryption and access level at rest: YOLO never rewraps them, makes them Public,
+  or disables output redaction. Programs that receive a secret can still copy or send it.
+- CLI and app **add**, **overwrite/new value**, **rename** and **move** operations deliver their DEKs
+  directly inside the daemon after the normal operation succeeds. New keys and moved-in keys join
+  every matching active YOLO, including Only me keys. No extra YOLO prompt is needed.
+  A key moved out is no longer covered. A new value remains covered.
+- Files written, copied, restored or renamed outside these daemon mutation paths do **not** join YOLO.
+  An out-of-band replacement, policy rewrap, backup rewrap, recovery or key upgrade can also invalidate
+  an existing key's coverage. The daemon checks the encrypted envelope and refuses stale coverage.
+  The app shows **YOLO · no prompt** only for names the daemon verifies as covered. Start YOLO again
+  to include an uncovered key. No client can submit a DEK to widen a folder's coverage.
+- A key can be covered by ancestor-folder YOLOs. The daemon first picks one whole matching per-key
+  temporary access whose scope fits. If none fits, it picks one matching YOLO: session before kind
+  before any agent, then deepest folder, then soonest end. It **never combines scopes**.
+  YOLO has no working-folder, command or use-count scope and does not count toward the 8-access cap.
+- YOLO ends at its end time, on **End**, when agents are blocked, or when the daemon restarts.
+  **Agent access does not end on screen lock.** Ending YOLO leaves per-key accesses alone.
+- The app shows one banner line and End button per active folder and grantee. The folder-menu
+  **End YOLO** ends all YOLO records on that folder; its row tag shows the soonest end.
+  Status and `lease ls` include one YOLO row per record. `status --json` also includes `yolos`.
+- Audit events `yolo-start`, `yolo-end`, `yolo-expired` and `yolo-used` name the folder and grantee.
+  The app uses the words “temporary access”, not “lease”.
+
+The helper has a separate typed YOLO approval template. Upgrading requires the usual human-approved
+helper and daemon re-pin before binary replacement (`install.sh` stages those pins). Do not bypass a
+pin mismatch: the old helper cannot render the new approval.
+
 ## Limits (full list)
 
 - **Bound `run`**: env, static AWS and registered SSO runs use a pinned child shim and
