@@ -201,16 +201,41 @@ for credentials that can outlive a Karambit grant.
 
 ## Roadmap
 
-- [ ] **Proxy mode for API keys.** The program gets a placeholder value.
-      Karambit adds the real key only on requests to a fixed host.
-- [ ] **More daemon hardening.** Memory locking and core-dump protection. Hardened-runtime signing is already in the installer.
-- [ ] **Signed and notarized releases**, and a Homebrew install.
-- [ ] **Linux port.** The core and CLI compile for Linux today, but the security features are not implemented there yet.
-- [ ] **MCP server**, so agents can call Karambit as a tool.
-- [ ] **`.env` import in the desktop app.**
-- [ ] **Windows port.**
+Our goal is one place to manage secrets and control how your tools use them. Keep them in the local
+vault or connect your own secret engine. Both belong in OSS, along with security fixes and hardening.
 
-Linked sources are a [backend interface](docs/backend-contract.md). This build has no built-in backends.
+For local storage, we aim to use the strongest platform protection we can properly support, including
+hardware-backed security where available. No silent fallback to weaker protection. For linked secrets,
+the external engine stays in control of permissions and lifetime; persistent local copies are not the default.
+
+This is our planned order, not a release schedule. Security work continues through every stage.
+
+1. **Make the foundation dependable.** Signed and notarized macOS releases, Homebrew installation,
+   clearer upgrades, and backup and recovery tested on a clean machine. Add memory locking and
+   core-dump protection where supported, and seek an independent security review.
+   Hardened-runtime signing is already in the installer.
+2. **Make everyday secret management easier.** Better search, descriptions, service links and review
+   dates. Add bulk organisation and desktop import, starting with `.env` files, with previews and
+   duplicate handling. Import will not remove old copies from chats or files.
+3. **Make access clear.** Show stored access, temporary grants and YOLO together without mixing them up.
+   Explain why a request was allowed or refused. Make scope, expiry and activity easier to inspect.
+   Extend existing controls before adding separate access modes.
+4. **Connect external secret engines.** Stabilise the backend interface and ship one tested connector
+   before adding more. Define authentication, caching, expiry, rotation and offline behavior for each.
+   AWS Secrets Manager is the first candidate, not yet a committed integration. Connecting your own
+   supported engine will not require a paid edition.
+5. **Keep credentials out of more programs.** Start with one narrow API proxy or broker workflow.
+   Keep the real credential in Karambit and restrict where it can be used. Clearly distinguish this
+   from direct access, where the program receives the value.
+6. **Support unattended tools.** Define a non-interactive flow for CI jobs and services, with workload
+   identity and short-lived credentials where the source supports them. Do not depend on a person's
+   Touch ID session for unattended work.
+7. **Add interfaces and platforms.** An MCP server that uses the same access rules, then secure Linux
+   and Windows implementations. Each platform must pass its own security and recovery checks, not
+   just compile. These efforts can proceed separately when their foundations are ready.
+
+Linked sources currently have a [backend interface](docs/backend-contract.md), but this build has no
+built-in backends. The core and CLI compile for Linux; the Linux security features are not implemented yet.
 
 ## Documentation
 
