@@ -23,6 +23,10 @@ shell commands can use the CLI. Karambit recognises some agents by process name 
 variable (for example Claude Code, Codex, pi and cursor-agent). That detection is a heuristic, so it
 is not a guarantee.
 
+<p align="center">
+  <img src="docs/assets/screenshots/key-panel.png" alt="Karambit app: the stripe folder with its keys, access levels and temporary access tags, and the side panel of stripe/api-key" width="900">
+</p>
+
 **Platform status:** The security features are implemented for macOS only. Linux and Windows ports
 are on the [roadmap](#roadmap).
 
@@ -99,6 +103,30 @@ Detection is a heuristic: a caller that evades it is treated as a human.
   The app defaults to 6 hours; the limit is 7 days. See [coverage and limits](docs/reference.md#yolo-for-a-folder).
 - **Block**: `karambit block --all` refuses all agent requests until you unblock.
   It does not stop processes, and it cannot take back a secret that a program already has.
+
+## The desktop app
+
+The app shows the same vault as the CLI. The screenshots use sample data.
+
+**Secrets.** Folders and keys with their access levels. Values are always masked.
+
+<img src="docs/assets/screenshots/secrets-list.png" alt="Secrets list with three folders, two keys, access level badges and filter chips" width="900">
+
+**Temporary access.** One row for each agent, each with its own End button. A secret holds up to 8.
+
+<img src="docs/assets/screenshots/temporary-access.png" alt="Temporary access dialog for stripe/api-key with three agents, the give access form and recent activity" width="600">
+
+**YOLO for a folder.** The dialog shows what each key does during YOLO before you start it.
+While YOLO is on, a red banner and red tags show it, and keys added later are covered too.
+
+<img src="docs/assets/screenshots/yolo-dialog.png" alt="YOLO for agents dialog for stripe/ with a red warning and a table of keys and their behaviour during YOLO" width="600">
+
+<img src="docs/assets/screenshots/yolo-on.png" alt="The stripe folder with YOLO on: a red banner with End YOLO, and a YOLO no prompt tag on each covered key" width="900">
+
+**Status.** Secure Enclave, Touch ID, backup, pinned binaries, agent blocking, and every active
+temporary access and YOLO, each with its own End button.
+
+<img src="docs/assets/screenshots/status.png" alt="Status page with this Mac, agents and the list of active temporary access and YOLO" width="900">
 
 ## Common tasks
 
