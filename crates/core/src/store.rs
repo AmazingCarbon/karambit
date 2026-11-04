@@ -77,7 +77,7 @@ impl Tier {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SecretFile {
     pub v: u32,
     pub name: String,

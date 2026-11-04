@@ -214,9 +214,13 @@ pub struct SecretMeta {
     pub has_backup: bool,
     pub created: u64,
     pub updated: u64,
-    /// Active lease on this secret, if any (filled in by `list`).
+    /// The active lease that ends first, if any (filled in by `list`). Kept for
+    /// older readers; `leases` has all of them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease: Option<daemon::LeaseView>,
+    /// Every active lease on this secret, one per grantee, soonest end first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leases: Vec<daemon::LeaseView>,
 }
 
 impl From<&SecretFile> for SecretMeta {
@@ -230,6 +234,7 @@ impl From<&SecretFile> for SecretMeta {
             created: f.created,
             updated: f.updated,
             lease: None,
+            leases: vec![],
         }
     }
 }
@@ -406,7 +411,9 @@ impl Karambit {
             .filter(|f| pattern.is_none_or(|p| store::glob_match(p, &f.name)))
             .map(|f| {
                 let mut m = SecretMeta::from(f);
-                m.lease = leases.iter().find(|l| l.info.name == f.name).cloned();
+                m.leases = leases.iter().filter(|l| l.info.name == f.name).cloned().collect();
+                m.leases.sort_by_key(|l| l.info.expires);
+                m.lease = m.leases.first().cloned();
                 m
             })
             .collect())
@@ -487,6 +494,7 @@ impl Karambit {
             if existing.is_some() {
                 self.end_leases_internal(std::slice::from_ref(&f.name), "value replaced", &dispatch);
             }
+            dispatch(daemon::Req::YoloEnroll { file: f.clone(), dek: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, dek.as_ref()), added: existing.is_none() })?;
             Ok(SecretMeta::from(&f))
         })
     }
@@ -753,18 +761,46 @@ impl Karambit {
         })
     }
 
+    /// Start one RAM-only folder access. Replaces only this folder and grantee.
+    pub fn yolo_start(&self, path: &str, to: &lease::Grantee, hours: f64) -> Result<Vec<daemon::YoloView>> {
+        self.require_human(fence::Verb::LeaseGrant, fence::Layer::Cli)?;
+        let r = daemon::request(&self.paths, &daemon::Req::YoloStart { path: path.into(), grantee: to.clone(), hours })?;
+        Ok(serde_json::from_value(r["yolos"].clone())?)
+    }
+
+    pub fn yolo_end(&self, path: &str, to: Option<&lease::Grantee>) -> Result<()> {
+        daemon::request(&self.paths, &daemon::Req::YoloEnd { path: path.into(), grantee: to.cloned() })?;
+        Ok(())
+    }
+
+    pub fn yolos(&self) -> Result<Vec<daemon::YoloView>> {
+        let r = daemon::request(&self.paths, &daemon::Req::YoloList)?;
+        Ok(serde_json::from_value(r["yolos"].clone())?)
+    }
+
+    /// End matching per-key and whole-folder temporary authority in one daemon operation.
+    pub fn end_temporary_access(&self, patterns: &[String]) -> Result<Vec<String>> {
+        let r = daemon::request(&self.paths, &daemon::Req::EndTemporaryAccess { patterns: patterns.to_vec() })?;
+        Ok(serde_json::from_value(r["revoked"].clone())?)
+    }
+
     /// End leases early. Agents may revoke (it only tightens); never prompts.
     pub fn revoke_lease(&self, patterns: &[String]) -> Result<Vec<String>> {
+        self.revoke_lease_for(patterns, None)
+    }
+
+    /// End leases early: all on the matching secrets, or only `to`'s.
+    pub fn revoke_lease_for(&self, patterns: &[String], to: Option<&lease::Grantee>) -> Result<Vec<String>> {
         self.require_init()?;
         let r = if daemon::running(&self.paths.root) {
-            daemon::request(&self.paths, &daemon::Req::Revoke { patterns: patterns.to_vec() })?
+            daemon::request(&self.paths, &daemon::Req::Revoke { patterns: patterns.to_vec(), grantee: to.cloned() })?
         } else {
             json!({"revoked": []})
         };
         let hit: Vec<String> = serde_json::from_value(r["revoked"].clone()).unwrap_or_default();
-        self.audited("revoke", &hit, json!({"patterns": patterns}), || {
+        self.audited("revoke", &hit, json!({"patterns": patterns, "to": to.map(|t| t.label())}), || {
             if hit.is_empty() {
-                bail!("no active lease matches {}", patterns.join(" "));
+                bail!("no active lease matches {}{}", patterns.join(" "), to.map(|t| format!(" for {}", t.label())).unwrap_or_default());
             }
             Ok(hit.clone())
         })
@@ -782,7 +818,8 @@ impl Karambit {
         if names.is_empty() {
             return;
         }
-        if let Ok(r) = dispatch(daemon::Req::Revoke { patterns: names.to_vec() }) {
+        let _ = dispatch(daemon::Req::YoloForget { names: names.to_vec() });
+        if let Ok(r) = dispatch(daemon::Req::Revoke { patterns: names.to_vec(), grantee: None }) {
             let hit: Vec<String> = serde_json::from_value(r["revoked"].clone()).unwrap_or_default();
             if !hit.is_empty() {
                 self.audit("lease-ended", &hit, json!({"why": why}), &Ok(()));
@@ -1019,6 +1056,9 @@ impl Karambit {
                 store::remove_secret(&self.paths, n)?;
             }
             self.end_leases_internal(&old, "renamed", &dispatch);
+            for (file, dek) in built.into_iter().zip(deks) {
+                dispatch(daemon::Req::YoloEnroll { file, dek: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, dek.as_ref()), added: false })?;
+            }
             Ok(old.iter().cloned().zip(new.iter().cloned()).collect())
         })
     }
@@ -2735,7 +2775,7 @@ mod proof_tests {
         let seen = revoked.clone();
         soft_ecdh();
         v.rename_internal("moved/new", "moved/again", move |req| {
-            if let daemon::Req::Revoke { patterns } = req { seen.borrow_mut().extend(patterns); }
+            if let daemon::Req::Revoke { patterns, .. } = req { seen.borrow_mut().extend(patterns); }
             Ok(json!({"revoked": []}))
         }).unwrap();
         assert_eq!(*revoked.borrow(), vec!["moved/new".to_string()]);

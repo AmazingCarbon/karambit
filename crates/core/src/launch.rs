@@ -103,7 +103,7 @@ pub(crate) struct PendingLaunch {
     pub(crate) sso_binding: Option<crate::daemon::SsoBinding>,
     pub(crate) sso_use: bool,
     pub(crate) lease_revision: u64,
-    pub(crate) scopes: std::collections::HashMap<String, crate::daemon::Scope>,
+    pub(crate) scopes: crate::daemon::LeaseScopes,
     pub(crate) caller: crate::agent::Caller,
     pub(crate) decisions: std::collections::BTreeMap<String, crate::RunAuthorization>,
     /// `RunUnredacted` was approved for this launch (spent at Prepare); no owner redactor will exist.

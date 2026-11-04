@@ -188,6 +188,16 @@ pub enum Req {
     Grant { leases: Vec<GrantItem> },
     HumanUnlock { names: Vec<String> },
     GrantLease { names: Vec<String>, grantee: Grantee, hours: f64, scope: Scope },
+    YoloStart { path: String, #[serde(rename = "to")] grantee: Grantee, hours: f64 },
+    YoloEnd { path: String, #[serde(default, rename = "to")] grantee: Option<Grantee> },
+    YoloList,
+    /// End all temporary authority matching key names or folder paths.
+    EndTemporaryAccess { patterns: Vec<String> },
+    /// Mutation callbacks only. Never accept a DEK or coverage change from the socket.
+    #[serde(skip_deserializing)]
+    YoloEnroll { file: store::SecretFile, dek: String, added: bool },
+    #[serde(skip_deserializing)]
+    YoloForget { names: Vec<String> },
     /// Ask for leased DEKs for these secrets. `cmd` = the command the caller is about
     /// to run (argv[0] resolved), checked against `cmds` scope.
     Use { names: Vec<String>, cmd: Option<String> },
@@ -201,7 +211,8 @@ pub enum Req {
     LaunchRedaction { id: String },
     LaunchBind { id: String },
     LaunchRedeem { token: String },
-    Revoke { patterns: Vec<String> },
+    /// End leases on matching secrets: all of them, or only `grantee`'s.
+    Revoke { patterns: Vec<String>, #[serde(default, skip_serializing_if = "Option::is_none")] grantee: Option<Grantee> },
     List,
     /// Register an ECS-style AWS credential endpoint for one run. `creds` is the
     /// profile JSON. Returns url + token. Ends with `aws_close` or after `ttl` secs.
@@ -258,6 +269,8 @@ pub struct LeaseView {
     pub info: LeaseInfo,
     pub scope: Scope,
     pub uses: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub yolo: bool,
 }
 
 // ---------------------------------------------------------------- client
@@ -846,6 +859,182 @@ struct Held {
     uses: u32,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct YoloView {
+    pub path: String,
+    pub to: Grantee,
+    pub to_label: String,
+    pub granted: u64,
+    pub expires: u64,
+    pub remaining: u64,
+    /// Only keys whose current encrypted envelope matches a daemon-owned DEK.
+    pub covered: Vec<String>,
+    pub added: Vec<String>,
+}
+
+struct Yolo {
+    info: LeaseInfo,
+    root: Option<(i32, u64)>,
+    keys: HashMap<String, (store::SecretFile, Held)>,
+    added: std::collections::HashSet<String>,
+}
+
+fn yolo_path(path: &str) -> Result<String> {
+    let path = path.trim_end_matches('/');
+    store::validate_name(path)?;
+    store::require_generic_name(path)?;
+    if path == "aws" || path.starts_with("aws/") || path == "sources" || path.starts_with("sources/") {
+        bail!("YOLO is not available for AWS or sources");
+    }
+    if crate::platform::helper::prompt_param(path) != path { bail!("folder too long for one prompt"); }
+    Ok(path.into())
+}
+
+fn same_file(a: &store::SecretFile, b: &store::SecretFile) -> bool {
+    a == b
+}
+
+fn yolo_pick<'a>(g: &'a State, file: &store::SecretFile, peer: &agent::Peer) -> Option<(&'a str, &'a Held)> {
+    if !peer.caller.is_agent() || file.is_public() { return None; }
+    g.yolos.iter().filter_map(|((path, _), y)| {
+        let (snapshot, h) = y.keys.get(&file.name)?;
+        (h.info.expires > now() && file.name.starts_with(&format!("{path}/"))
+            && same_file(snapshot, file) && grantee_matches(h, peer)).then_some((path.as_str(), h))
+    }).min_by_key(|(path, h)| (grantee_rank(&h.info.to), std::cmp::Reverse(path.split('/').count()), h.info.expires))
+}
+
+fn yolo_enroll(g: &mut State, file: &store::SecretFile, dek: &Dek, added: bool) {
+    if file.is_public() { return; }
+    for ((path, _), y) in &mut g.yolos {
+        if y.info.expires <= now() || !file.name.starts_with(&format!("{path}/")) { continue; }
+        if added { y.added.insert(file.name.clone()); }
+        let mut info = y.info.clone();
+        info.name = file.name.clone();
+        y.keys.insert(file.name.clone(), (file.clone(), Held { info, dek: dek.clone(), root: y.root, scope: Scope::default(), uses: 0 }));
+    }
+}
+
+/// Snapshot metadata under State, then verify envelopes without holding it.
+fn yolo_views(p: &Paths, st: &Mutex<State>) -> Vec<YoloView> {
+    let snapshots: Vec<_> = st.lock().unwrap().yolos.iter().filter(|(_, y)| y.info.expires > now()).map(|((path, _), y)| {
+        (YoloView { path: path.clone(), to: y.info.to.clone(), to_label: y.info.to_label.clone(),
+            granted: y.info.granted, expires: y.info.expires, remaining: y.info.expires.saturating_sub(now()), covered: vec![], added: y.added.iter().cloned().collect() },
+         y.keys.values().map(|(f, _)| f.clone()).collect::<Vec<_>>())
+    }).collect();
+    snapshots.into_iter().map(|(mut view, files)| {
+        view.covered = files.into_iter().filter(|snapshot|
+            store::load_secret(p, &snapshot.name).is_ok_and(|f| same_file(snapshot, &f))).map(|f| f.name).collect();
+        view.covered.sort();
+        view.added.retain(|n| view.covered.contains(n));
+        view.added.sort();
+        view
+    }).collect()
+}
+
+/// Agent leases: one per secret and grantee, so `pi` and `claude` can hold separate
+/// windows and scopes on the same secret. A grant replaces only the same grantee's lease.
+#[derive(Default)]
+struct Leases(HashMap<String, std::collections::BTreeMap<Grantee, Held>>);
+
+impl Leases {
+    fn is_empty(&self) -> bool { self.0.is_empty() }
+    fn clear(&mut self) { self.0.clear(); }
+    fn for_secret(&self, name: &str) -> impl Iterator<Item = &Held> {
+        self.0.get(name).into_iter().flat_map(|m| m.values())
+    }
+    fn get_for_mut(&mut self, name: &str, to: &Grantee) -> Option<&mut Held> { self.0.get_mut(name)?.get_mut(to) }
+    /// Insert or replace this grantee's lease. Refused when the secret already holds
+    /// `MAX_PER_SECRET` leases for other grantees.
+    fn put(&mut self, held: Held) -> Result<()> {
+        let m = self.0.entry(held.info.name.clone()).or_default();
+        if !m.contains_key(&held.info.to) && m.len() >= crate::lease::MAX_PER_SECRET {
+            bail!("{} already has {} temporary accesses; end one first", held.info.name, crate::lease::MAX_PER_SECRET);
+        }
+        m.insert(held.info.to.clone(), held);
+        Ok(())
+    }
+    /// Whether a new grant for `to` fits under the per-secret cap.
+    fn has_room(&self, name: &str, to: &Grantee) -> bool {
+        self.0.get(name).is_none_or(|m| m.contains_key(to) || m.len() < crate::lease::MAX_PER_SECRET)
+    }
+    fn remove_for(&mut self, name: &str, to: &Grantee) -> Option<Held> {
+        let m = self.0.get_mut(name)?;
+        let h = m.remove(to);
+        if m.is_empty() { self.0.remove(name); }
+        h
+    }
+    fn remove_secret(&mut self, name: &str) -> bool { self.0.remove(name).is_some() }
+    fn names(&self) -> impl Iterator<Item = &String> { self.0.keys() }
+    fn all(&self) -> impl Iterator<Item = &Held> { self.0.values().flat_map(|m| m.values()) }
+    /// Drop every lease `keep` rejects; returns (name, grantee label) of each dropped one.
+    fn retain(&mut self, mut keep: impl FnMut(&Held) -> bool) -> Vec<(String, String)> {
+        let mut gone = vec![];
+        for (name, m) in self.0.iter_mut() {
+            m.retain(|_, h| { let k = keep(h); if !k { gone.push((name.clone(), h.info.to_label.clone())); } k });
+        }
+        self.0.retain(|_, m| !m.is_empty());
+        gone
+    }
+    /// The lease that serves `peer` for `name`: unexpired, the grantee matches the
+    /// kernel-derived caller, and `fits` accepts it. Scopes are never combined: one
+    /// lease is chosen whole. Most specific grantee first (session, kind, any), then
+    /// the one that ends first.
+    fn pick(&self, name: &str, peer: &agent::Peer, mut fits: impl FnMut(&Held) -> bool) -> Option<&Held> {
+        let t = now();
+        self.for_secret(name)
+            .filter(|h| h.info.expires > t && grantee_matches(h, peer) && fits(h))
+            .min_by_key(|h| (grantee_rank(&h.info.to), h.info.expires))
+    }
+}
+
+#[cfg(test)]
+impl Leases {
+    // Single-lease shorthands for tests written before per-grantee leases.
+    fn only(&self, name: &str) -> Option<&Held> { self.for_secret(name).next() }
+    fn get_mut(&mut self, name: &str) -> Option<&mut Held> { self.0.get_mut(name)?.values_mut().next() }
+    fn contains_key(&self, name: &str) -> bool { self.0.contains_key(name) }
+    fn insert(&mut self, name: String, mut held: Held) { held.info.name = name; self.put(held).unwrap(); }
+    fn remove(&mut self, name: &str) -> Option<Held> { self.0.remove(name)?.into_values().next() }
+    fn len(&self) -> usize { self.all().count() }
+    fn values(&self) -> impl Iterator<Item = &Held> { self.all() }
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut Held> { self.0.values_mut().flat_map(|m| m.values_mut()) }
+}
+
+#[cfg(test)]
+impl std::ops::Index<&str> for Leases {
+    type Output = Held;
+    fn index(&self, name: &str) -> &Held { self.only(name).expect("lease") }
+}
+
+/// Does this lease's grantee cover the kernel-derived caller?
+fn grantee_matches(h: &Held, peer: &agent::Peer) -> bool {
+    match (&h.info.to, h.root) {
+        (Grantee::Any, _) => true,
+        (Grantee::Kind(k), _) => peer.caller.kind.as_deref() == Some(k.as_str()),
+        (Grantee::Session(_), Some(root)) => peer.descends_from(root),
+        (Grantee::Session(_), None) => false,
+        // Human self-leases live in a separate map; never served on the agent path.
+        (Grantee::Human, _) => false,
+    }
+}
+
+/// Lower = more specific.
+fn grantee_rank(to: &Grantee) -> u8 {
+    match to { Grantee::Session(_) => 0, Grantee::Kind(_) => 1, Grantee::Any => 2, Grantee::Human => 3 }
+}
+
+/// Lease scopes seen before a prompt or launch: per secret and grantee. A change
+/// in between refuses the request instead of using the new scope.
+pub(crate) type LeaseScopes = HashMap<String, std::collections::BTreeMap<Grantee, Scope>>;
+
+fn scope_snapshot(g: &State, names: &[String]) -> LeaseScopes {
+    names.iter().filter_map(|n| g.leases.0.get(n).map(|m| (n.clone(), m.iter().map(|(k, h)| (k.clone(), h.scope.clone())).collect()))).collect()
+}
+
+fn snapshot_scope<'a>(scopes: &'a LeaseScopes, h: &Held) -> Option<&'a Scope> {
+    scopes.get(&h.info.name)?.get(&h.info.to)
+}
+
 struct AwsEp {
     caller: agent::Caller,
     profile: String,
@@ -1001,7 +1190,8 @@ pub(crate) struct State {
     unredacted_approvals: Vec<(agent::ProcessIdentity, String, u64)>,
     /// Present while an SSO launch's owner is connected for redaction additions.
     redaction_feeds: HashMap<String, RedactionFeed>,
-    leases: HashMap<String, Held>,
+    leases: Leases,
+    yolos: std::collections::BTreeMap<(String, Grantee), Yolo>,
     lease_revision: u64,
     /// Human self-leases ("Only me + Touch ID"): no scope, ended when the screen locks.
     human: HashMap<(i32, u64, String), Held>,
@@ -1024,7 +1214,7 @@ impl State {
     fn keeps_alive(&self, at: u64) -> bool {
         // Pending launches are in-flight until the sweep burns them. Burned
         // tombstones do not keep an otherwise idle daemon alive.
-        !self.leases.is_empty() || !self.human.is_empty() || !self.aws.is_empty()
+        !self.leases.is_empty() || !self.yolos.is_empty() || !self.human.is_empty() || !self.aws.is_empty()
             || self.sso.values().any(|s| s.refresh_token.is_some() || s.access_expires_at > at)
             || self.pending_launches.has_pending() || self.pending_launches.has_live_bound(at)
     }
@@ -1520,6 +1710,7 @@ fn handle_as_scoped(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port:
         Req::PubKeys => Some("daemon-pubkeys"),
         Req::StatusSelftest => Some("daemon-status-selftest"),
         Req::Grant { .. } | Req::GrantLease { .. } => Some("daemon-grant"),
+        Req::YoloStart { .. } => Some("daemon-yolo-start"),
         Req::HumanUnlock { .. } => Some("daemon-human-unlock"),
         Req::Use { .. } => Some("daemon-use"),
         Req::AwsOpen { .. } => Some("daemon-aws-open"),
@@ -1531,7 +1722,8 @@ fn handle_as_scoped(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port:
         _ => None,
     };
     let containment = match &req {
-        Req::Revoke { .. } => Some("daemon-revoke"),
+        Req::Revoke { .. } | Req::EndTemporaryAccess { .. } => Some("daemon-revoke"),
+        Req::YoloEnd { .. } => Some("daemon-yolo-end"),
         Req::AwsClose { .. } => Some("daemon-aws-close"),
         Req::SsoForget { .. } => Some("daemon-sso-forget"),
         Req::SsoLogout { .. } => Some("daemon-sso-logout"),
@@ -1543,7 +1735,8 @@ fn handle_as_scoped(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port:
         Req::SourceAdd { name, .. } | Req::SourceRemove { name } | Req::SourceRetarget { name, .. }
         | Req::Add { name, .. } | Req::Copy { name } => vec![name.clone()],
         Req::Rename { from, to } => vec![from.clone(), to.clone()],
-        Req::ChangePolicy { patterns, .. } | Req::Delete { patterns } => patterns.clone(),
+        Req::YoloStart { path, .. } | Req::YoloEnd { path, .. } => vec![path.clone()],
+        Req::ChangePolicy { patterns, .. } | Req::Delete { patterns } | Req::EndTemporaryAccess { patterns } => patterns.clone(),
         Req::Grant { leases } => leases.iter().map(|l| l.name.clone()).collect(),
         Req::Unlock { names, .. } | Req::Use { names, .. } | Req::HumanUnlock { names } | Req::GrantLease { names, .. } => names.clone(),
         Req::AwsOpen { profile, .. } => vec![profile.clone()],
@@ -1595,20 +1788,26 @@ fn check_lease_snapshot(p: &Paths, state: &State, revision: u64, files: &[store:
 
 /// Timer containment, separated from the screen-lock/helper probe for testing.
 fn expire_leases(p: &Paths, st: &Mutex<State>, t: u64) -> bool {
-    let (gone, human_expired, has_human, launches) = {
+    let (ended, human_expired, has_human, launches) = {
         let mut g = st.lock().unwrap();
-        let gone: Vec<String> = g.leases.iter().filter(|(_, h)| h.info.expires <= t).map(|(n, _)| n.clone()).collect();
-        for n in &gone { g.leases.remove(n); }
+        let ended = g.leases.retain(|h| h.info.expires > t);
+        g.yolos.retain(|(path, to), y| {
+            if y.info.expires > t { return true; }
+            log_event(p, "yolo-expired", std::slice::from_ref(path), json!({"folder": path, "grantee": to}));
+            false
+        });
+        let mut gone: Vec<String> = ended.iter().map(|(n, _)| n.clone()).collect();
+        gone.dedup();
         let he: Vec<_> = g.human.iter().filter(|(_, h)| h.info.expires <= t).map(|(n, _)| n.clone()).collect();
         for n in &he { g.human.remove(n); }
         g.aws.retain(|_, e| e.expires > Instant::now());
         let launches = g.pending_launches.burn_pending_matching(&gone);
         g.reconcile_launch_endpoints();
-        (gone, he.into_iter().map(|(_, _, name)| name).collect::<Vec<_>>(), !g.human.is_empty(), launches)
+        (ended, he.into_iter().map(|(_, _, name)| name).collect::<Vec<_>>(), !g.human.is_empty(), launches)
     };
     audit_contained_launches(p, "launch-lease-expired", launches);
     audit_bound_containment(p, st);
-    if !gone.is_empty() { log_event(p, "lease-expired", &gone, json!({})); }
+    for (name, to) in &ended { log_event(p, "lease-expired", std::slice::from_ref(name), json!({"to": to})); }
     if !human_expired.is_empty() { log_event(p, "lease-expired", &human_expired, json!({"to": "you (human)"})); }
     has_human
 }
@@ -2189,19 +2388,28 @@ fn redeem_launch(session: &mut BoundSession<'_>, frame: &[u8], deadline: Instant
         let decisions = launch_authorizations(&g, &peer, &files, &launch.binding, cwd.as_deref(), &launch.scopes, &cfg)?;
         if decisions != launch.decisions { bail!("launch refused"); }
         let mut deks = fresh_deks;
+        // The same deterministic choice as launch_authorizations, so the lease that
+        // authorized is the lease that pays.
+        let mut spend = vec![];
         for (name, decision) in &decisions {
             if *decision == crate::RunAuthorization::Lease {
-                deks.insert(name.clone(), g.leases.get(name).context("launch refused")?.dek.clone());
+                let file = files.iter().find(|f| &f.name == name).context("launch refused")?;
+                let (h, folder) = launch_lease(&g, &peer, file, &launch.binding, cwd.as_deref(), &launch.scopes).context("launch refused")?;
+                deks.insert(name.clone(), h.dek.clone());
+                spend.push((name.clone(), h.info.to.clone(), folder.map(str::to_owned)));
             }
         }
         let human_keys = decisions.iter().filter(|(_, d)| **d == crate::RunAuthorization::HumanCached)
             .map(|(name, _)| human_cache_key(&g, &peer, name).context("launch refused"))
             .collect::<Result<Vec<_>>>()?;
-        for (name, decision) in &decisions {
-            if *decision != crate::RunAuthorization::Lease { continue; }
-            let h = g.leases.get_mut(name).context("launch refused")?;
+        for (name, to, folder) in &spend {
+            if let Some(path) = folder {
+                log_event(session.p, "yolo-used", std::slice::from_ref(path), json!({"folder": path, "grantee": to, "secret": name}));
+                continue;
+            }
+            let h = g.leases.get_for_mut(name, to).context("launch refused")?;
             h.uses += 1;
-            if h.scope.max_uses.is_some_and(|m| h.uses >= m) { g.leases.remove(name); }
+            if h.scope.max_uses.is_some_and(|m| h.uses >= m) { g.leases.remove_for(name, to); }
         }
         for key in human_keys {
             let h = g.human.get_mut(&key).expect("validated cache key");
@@ -2455,29 +2663,33 @@ fn human_cache_key(g: &State, peer: &agent::Peer, name: &str) -> Option<(i32, u6
     g.human.get(&key).filter(|h| h.info.expires > now()).map(|_| key)
 }
 
+/// Pick one whole per-key access whose scope still fits. Only if none fits,
+/// fall back to one matching YOLO. The optional folder identifies YOLO authority.
+fn launch_lease<'a>(
+    g: &'a State, peer: &agent::Peer, file: &store::SecretFile,
+    binding: &crate::launch::LaunchBinding, cwd: Option<&str>, scopes: &LeaseScopes,
+) -> Option<(&'a Held, Option<&'a str>)> {
+    g.leases.pick(&file.name, peer, |h| {
+        snapshot_scope(scopes, h) == Some(&h.scope)
+            && !h.scope.max_uses.is_some_and(|m| h.uses >= m)
+            && !h.scope.cwd.as_ref().is_some_and(|root| !cwd.is_some_and(|c| under(c, root))
+                || !binding.cwd().to_str().is_some_and(|c| under(c, root)))
+            && binding.check_scope(&h.scope.cmds).is_ok()
+    }).map(|h| (h, None)).or_else(|| yolo_pick(g, file, peer).map(|(path, h)| (h, Some(path))))
+}
+
 /// In-memory authorization only. Files, canonical cwd and target snapshots must be
 /// loaded outside State. An invalid explicit lease falls back to stored policy,
 /// just like legacy Use + Unlock(run); it cannot elevate a human caller.
 fn launch_authorizations(
     g: &State, peer: &agent::Peer, files: &[store::SecretFile],
     binding: &crate::launch::LaunchBinding, cwd: Option<&str>,
-    scopes: &HashMap<String, Scope>, cfg: &store::Config,
+    scopes: &LeaseScopes, cfg: &store::Config,
 ) -> Result<std::collections::BTreeMap<String, crate::RunAuthorization>> {
     use crate::RunAuthorization::*;
     files.iter().map(|file| {
-        let lease = peer.caller.is_agent() && !file.is_public() && g.leases.get(&file.name).is_some_and(|h| {
-            let who = match (&h.info.to, h.root) {
-                (Grantee::Any, _) => true,
-                (Grantee::Kind(k), _) => peer.caller.kind.as_deref() == Some(k.as_str()),
-                (Grantee::Session(_), Some(root)) => peer.descends_from(root),
-                _ => false,
-            };
-            who && h.info.expires > now() && scopes.get(&file.name) == Some(&h.scope)
-                && !h.scope.max_uses.is_some_and(|m| h.uses >= m)
-                && !h.scope.cwd.as_ref().is_some_and(|root| !cwd.is_some_and(|c| under(c, root))
-                    || !binding.cwd().to_str().is_some_and(|c| under(c, root)))
-                && binding.check_scope(&h.scope.cmds).is_ok()
-        });
+        let lease = peer.caller.is_agent() && !file.is_public()
+            && launch_lease(g, peer, file, binding, cwd, scopes).is_some();
         let cached = crate::human_cache_eligible(&peer.caller, cfg, file)
             && human_cache_key(g, peer, &file.name).is_some();
         let decision = crate::run_authorization(&peer.caller, file, lease, cached);
@@ -2626,9 +2838,9 @@ fn prepare_launch(p: &Paths, st: &Mutex<State>, peer: &agent::Peer, refs: Vec<St
         .ok().flatten().context("launch refused")?;
     let CommandBinding::Pinned { sha256: hash, .. } = &owner_exe.0 else { bail!("launch refused") };
     if !pins.lines().any(|pin| pin.trim() == hash) { bail!("launch refused"); }
-    let (scopes, revision): (HashMap<_, _>, _) = {
+    let (scopes, revision) = {
         let g = st.lock().unwrap();
-        (refs.iter().filter_map(|n| g.leases.get(n).map(|h| (n.clone(), h.scope.clone()))).collect(), g.lease_revision)
+        (scope_snapshot(&g, &refs), g.lease_revision)
     };
     #[cfg(test)]
     LAUNCH_CAPTURE_HOOK.with(|h| { if let Some(hook) = h.borrow_mut().take() { hook(); } });
@@ -2673,7 +2885,8 @@ const SCOPED_LEGACY_REFUSAL: &str = "scoped lease: use `karambit run`";
 fn session_mint_leases(p: &Paths, st: &Mutex<State>, names: &[String]) -> std::collections::HashSet<String> {
     let deks: Vec<_> = {
         let g = st.lock().unwrap();
-        names.iter().filter(|n| crate::aws::is_aws_entry(n)).filter_map(|n| g.leases.get(n).map(|h| (n.clone(), h.dek.clone()))).collect()
+        // Every lease on a secret holds the same DEK (one per file).
+        names.iter().filter(|n| crate::aws::is_aws_entry(n)).filter_map(|n| g.leases.for_secret(n).next().map(|h| (n.clone(), h.dek.clone()))).collect()
     };
     deks.into_iter().filter(|(name, dek)| {
         store::load_secret(p, name).and_then(|f| crate::crypto::open(dek, &f))
@@ -2686,14 +2899,7 @@ const SESSION_MINT_REFUSAL: &str = "session-mint profile: use `karambit aws NAME
 // Diagnostic/defense-in-depth lookup only: never spends lease authority. The
 // peer is kernel-derived; command claims are deliberately irrelevant here.
 fn active_scoped_lease(g: &State, peer: &agent::Peer, name: &str) -> bool {
-    peer.caller.is_agent() && g.leases.get(name).is_some_and(|h| {
-        h.info.expires > now() && !h.scope.cmds.is_empty() && match (&h.info.to, h.root) {
-            (Grantee::Any, _) => true,
-            (Grantee::Kind(k), _) => peer.caller.kind.as_deref() == Some(k.as_str()),
-            (Grantee::Session(_), Some(root)) => peer.descends_from(root),
-            _ => false,
-        }
-    })
+    peer.caller.is_agent() && g.leases.pick(name, peer, |h| !h.scope.cmds.is_empty()).is_some()
 }
 
 // gate_open disclosures intentionally skip Use. Add advice only to an already
@@ -2965,6 +3171,62 @@ fn ensure_fixed_tool_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn end_temporary(p: &Paths, st: &Ctx, patterns: Vec<String>, grantee: Option<Grantee>, end_yolo: bool) -> Result<Value> {
+    let mut g = st.lock().unwrap();
+    g.lease_revision += 1;
+    let matches = |n: &str| patterns.iter().any(|pt| store::glob_match(pt, n)
+        || (end_yolo && pt.ends_with('/') && n.starts_with(pt)));
+    let mut hit: Vec<String> = if grantee == Some(Grantee::Human) {
+        // Only the human's cached unlocks; agent leases keep theirs.
+        let mut hit: Vec<String> = g.human.keys().map(|(_, _, name)| name.clone()).filter(|n| matches(n)).collect();
+        hit.sort();
+        hit.dedup();
+        g.human.retain(|(_, _, name), _| !hit.contains(name));
+        hit
+    } else if let Some(to) = &grantee {
+        // One agent's leases only; the human cache and other agents keep theirs.
+        let names: Vec<String> = g.leases.names().filter(|n| matches(n)).cloned().collect();
+        names.into_iter().filter(|n| g.leases.remove_for(n, to).is_some()).collect()
+    } else {
+        let mut hit: Vec<String> = g.leases.names().chain(g.human.keys().map(|(_, _, name)| name))
+            .filter(|n| matches(n)).cloned().collect();
+        hit.sort();
+        hit.dedup();
+        for n in &hit {
+            g.leases.remove_secret(n);
+            g.human.retain(|(_, _, name), _| name != n);
+        }
+        hit
+    };
+    if end_yolo {
+        // Remove whole records, including future enrollment authority. Never rely on
+        // verified list metadata, which can be empty after an envelope changes.
+        // Match the folder selector, not a bare path: key "stripe" is not folder "stripe/".
+        g.yolos.retain(|(path, to), y| {
+            let remove = matches(&format!("{path}/"))
+                || y.keys.keys().any(|name| matches(name))
+                || patterns.iter().any(|pt| pt.starts_with(&format!("{path}/")));
+            if remove {
+                hit.push(format!("{path}/"));
+                log_event(p, "yolo-end", std::slice::from_ref(path), json!({"folder": path, "grantee": to}));
+            }
+            !remove
+        });
+        hit.sort();
+        hit.dedup();
+        log_event(p, "revoke", &hit, json!({"patterns": patterns, "all_temporary": true}));
+    }
+    let launch_patterns: Vec<_> = patterns.iter().map(|pt| {
+        if end_yolo && pt.ends_with('/') { format!("{pt}*") } else { pt.clone() }
+    }).collect();
+    let launches = g.pending_launches.burn_matching(&launch_patterns);
+    g.reconcile_launch_endpoints();
+    drop(g);
+    audit_contained_launches(p, "launch-revoke", launches);
+    audit_bound_containment(p, st);
+    Ok(json!({"revoked": hit}))
+}
+
 fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u16) -> Result<Value> {
     // Capability fence: the daemon's lookup is authoritative. The caller is the
     // kernel-derived Peer, never a wire claim. Nothing below runs for a fenced verb.
@@ -3007,6 +3269,9 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
                 // Conservative containment also burns unrelated outstanding grants.
                 g.lease_revision += 1;
                 g.leases.clear();
+                for ((path, to), _) in std::mem::take(&mut g.yolos) {
+                    log_event(p, "yolo-end", std::slice::from_ref(&path), json!({"folder": path, "grantee": to, "why": "agents blocked"}));
+                }
                 g.aws.clear();
                 g.pending_launches = Default::default();
                 g.launch_redactions.clear();
@@ -3224,6 +3489,70 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
             });
             Ok(json!({"ok": true}))
         }
+        Req::YoloStart { path, grantee, hours } => {
+            let path = yolo_path(&path)?;
+            if !(hours > 0.0 && hours <= crate::lease::MAX_HOURS) { bail!("invalid YOLO hours"); }
+            let root = match &grantee {
+                Grantee::Human => bail!("YOLO requires an agent grantee"),
+                Grantee::Session(s) => Some(crate::resolve_session_root(s)?),
+                Grantee::Kind(k) if k.is_empty() || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') => bail!("invalid agent kind"),
+                _ => None,
+            };
+            let label = grantee.label();
+            if crate::platform::helper::prompt_param(&label) != label { bail!("grantee too long for one prompt"); }
+            let revision = st.lock().unwrap().lease_revision;
+            let files: Vec<_> = store::list_secrets(p)?.into_iter().filter(|f| !f.is_public() && f.name.starts_with(&format!("{path}/"))).collect();
+            let reason = Prompt::Yolo { folder: format!("{path}/"), grantee: label.clone(), hours: hours.to_string() };
+            if crate::platform::helper::prompt_param(&format!("{path}/")) != format!("{path}/") { bail!("folder too long for one prompt"); }
+            if !files.iter().any(|f| f.tier == store::Tier::Bio) { crate::platform::helper::auth(&reason)?; }
+            let v = peer_vault(p, &peer)?;
+            let deks = v.unwrap_deks_local(&files, &reason)?;
+            for (f, dek) in files.iter().zip(&deks) { crate::crypto::open(dek, f)?; }
+            let mut g = st.lock().unwrap();
+            check_lease_snapshot(p, &g, revision, &files)?;
+            let current: Vec<_> = store::list_secrets(p)?.into_iter().filter(|f| !f.is_public() && f.name.starts_with(&format!("{path}/"))).map(|f| f.name).collect();
+            if current != files.iter().map(|f| f.name.clone()).collect::<Vec<_>>() { bail!("folder changed during approval; retry"); }
+            let info = LeaseInfo { name: format!("{path}/"), to: grantee.clone(), to_label: label, granted: now(),
+                expires: now() + (hours * 3600.0).round() as u64, remaining: (hours * 3600.0).round() as u64, by: format!("peer pid:{}", peer.pid) };
+            let keys = files.into_iter().zip(deks).map(|(f, dek)| {
+                let mut info = info.clone(); info.name = f.name.clone();
+                (f.name.clone(), (f, Held { info, dek, root, scope: Scope::default(), uses: 0 }))
+            }).collect();
+            g.lease_revision += 1;
+            g.yolos.insert((path.clone(), grantee.clone()), Yolo { info, root, keys, added: Default::default() });
+            log_event(p, "yolo-start", std::slice::from_ref(&path), json!({"folder": path, "grantee": grantee, "hours": hours}));
+            drop(g);
+            Ok(json!({"yolos": yolo_views(p, st)}))
+        }
+        Req::YoloEnd { path, grantee } => {
+            let path = yolo_path(&path)?;
+            let mut g = st.lock().unwrap();
+            g.lease_revision += 1;
+            g.yolos.retain(|(folder, to), _| {
+                if folder != &path || grantee.as_ref().is_some_and(|g| g != to) { return true; }
+                log_event(p, "yolo-end", std::slice::from_ref(&path), json!({"folder": path, "grantee": to}));
+                false
+            });
+            Ok(json!({"ok": true}))
+        }
+        Req::YoloList => Ok(json!({"yolos": yolo_views(p, st)})),
+        Req::YoloEnroll { file, dek, added } => {
+            let dek = Zeroizing::new(dek);
+            if file.is_public() || st.lock().unwrap().yolos.is_empty() { return Ok(json!({"ok": true})); }
+            let raw = Zeroizing::new(B64.decode(dek.as_str())?);
+            if raw.len() != 32 { bail!("invalid DEK"); }
+            let mut dek = Zeroizing::new([0u8; 32]);
+            dek.copy_from_slice(&raw);
+            crate::crypto::open(&dek, &file)?;
+            if !same_file(&file, &store::load_secret(p, &file.name)?) { bail!("key changed during mutation"); }
+            yolo_enroll(&mut st.lock().unwrap(), &file, &dek, added);
+            Ok(json!({"ok": true}))
+        }
+        Req::YoloForget { names } => {
+            let mut g = st.lock().unwrap();
+            for y in g.yolos.values_mut() { for n in &names { y.keys.remove(n); } }
+            Ok(json!({"ok": true}))
+        }
         Req::Grant { .. } => bail!("client-supplied DEKs are refused; use GrantLease or HumanUnlock"),
         Req::HumanUnlock { names } => {
             let revision = st.lock().unwrap().lease_revision;
@@ -3272,6 +3601,13 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
             let files = names.iter().map(|name| store::load_secret(p, name)).collect::<Result<Vec<_>>>()?;
             let files: Vec<_> = files.into_iter().filter(|f| !f.is_public()).collect();
             if files.is_empty() { bail!("nothing to lease"); }
+            // Refuse a 9th grantee before the prompt (and again under the lock below).
+            {
+                let g = st.lock().unwrap();
+                if let Some(f) = files.iter().find(|f| !g.leases.has_room(&f.name, &grantee)) {
+                    bail!("{} already has {} temporary accesses; end one first", f.name, crate::lease::MAX_PER_SECRET);
+                }
+            }
             // Refuse before any prompt: names, grantee and scope are all approved on screen,
             // and the helper cuts each field at 120 characters.
             let (grantee_label, scope_label) = (grantee.label(), scope.label());
@@ -3287,13 +3623,17 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
             for (f, dek) in files.iter().zip(&deks) { crate::crypto::open(dek, f)?; }
             let mut g = st.lock().unwrap();
             check_lease_snapshot(p, &g, revision, &files)?;
+            if let Some(f) = files.iter().find(|f| !g.leases.has_room(&f.name, &grantee)) {
+                bail!("{} already has {} temporary accesses; end one first", f.name, crate::lease::MAX_PER_SECRET);
+            }
             let mut out = vec![];
             for (f, dek) in files.into_iter().zip(deks) {
                 let expires = now() + (hours * 3600.0).round() as u64;
                 let info = LeaseInfo { name: f.name.clone(), to_label: grantee.label(), to: grantee.clone(), granted: now(), expires,
                     remaining: expires.saturating_sub(now()), by: format!("peer pid:{}", peer.pid) };
-                out.push(LeaseView { info: info.clone(), scope: scope.clone(), uses: 0 });
-                g.leases.insert(f.name, Held { info, dek, root, scope: scope.clone(), uses: 0 });
+                out.push(LeaseView { info: info.clone(), scope: scope.clone(), uses: 0, yolo: false });
+                // Replaces only this grantee's lease; other agents keep theirs.
+                g.leases.put(Held { info, dek, root, scope: scope.clone(), uses: 0 })?;
             }
             Ok(json!({"leases": out}))
         }
@@ -3320,14 +3660,15 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
             }
             let cwd = peer.cwd_abs().map(|c| canon_dir(&c));
             // Snapshot scope metadata only; legacy Use never reads a claimed target.
-            let (scopes, revision): (HashMap<_, _>, _) = {
+            let (scopes, revision) = {
                 let g = st.lock().unwrap();
-                (names.iter().filter_map(|n| g.leases.get(n).map(|h| (n.clone(), h.scope.clone()))).collect(), g.lease_revision)
+                (scope_snapshot(&g, &names), g.lease_revision)
             };
             // The DEK opens the file on disk, so releasing it releases the long-lived key of a
             // session_mint profile. Those run only through `karambit aws`, which spends the
             // lease inside the daemon. File I/O stays outside State; unreadable = refused.
             let session_mint = session_mint_leases(p, st, &names);
+            let yolo_files: HashMap<_, _> = names.iter().filter_map(|n| store::load_secret(p, n).ok().map(|f| (n.clone(), f))).collect();
             #[cfg(test)]
             USE_SCOPE_HOOK.with(|h| { if let Some(hook) = h.borrow_mut().take() { hook(); } });
             let mut g = st.lock().unwrap();
@@ -3337,56 +3678,48 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
             let mut exhausted = vec![];
             let revision_changed = revision != g.lease_revision;
             for n in names {
-                let Some(h) = g.leases.get_mut(&n) else { continue };
-                if h.info.expires <= now() {
-                    continue;
-                }
-                let who_ok = match (&h.info.to, h.root) {
-                    (Grantee::Any, _) => true,
-                    (Grantee::Kind(k), _) => peer.caller.kind.as_deref() == Some(k.as_str()),
-                    (Grantee::Session(_), Some(root)) => peer.descends_from(root),
-                    (Grantee::Session(_), None) => false,
-                    // Human self-leases live in a separate map; never served on the agent path.
-                    (Grantee::Human, _) => false,
+                // Why a lease that names this caller can't serve the request.
+                let refusal = |h: &Held| -> Option<String> {
+                    if session_mint.contains(&n) { return Some(SESSION_MINT_REFUSAL.into()); }
+                    // Recheck after the snapshot; a concurrent scope change must not
+                    // turn a refused scoped request into an unscoped release.
+                    if revision_changed || snapshot_scope(&scopes, h) != Some(&h.scope) { return Some("lease scope changed; retry".into()); }
+                    // Only LaunchRedeem can spend command-scoped authority.
+                    if !h.scope.cmds.is_empty() { return Some(SCOPED_LEGACY_REFUSAL.into()); }
+                    if let Some(root) = &h.scope.cwd && !cwd.as_deref().is_some_and(|c| under(c, root)) {
+                        return Some(format!("lease only valid under {root}"));
+                    }
+                    None
                 };
-                if !who_ok {
-                    continue;
-                }
-                if session_mint.contains(&n) {
-                    denied.insert(n.clone(), json!(SESSION_MINT_REFUSAL));
-                    continue;
-                }
-                // Recheck after the snapshot; a concurrent scope change must not
-                // turn a refused scoped request into an unscoped release.
-                if revision_changed || scopes.get(&n) != Some(&h.scope) {
-                    denied.insert(n.clone(), json!("lease scope changed; retry"));
-                    continue;
-                }
-                // Only LaunchRedeem can spend command-scoped authority.
-                if !h.scope.cmds.is_empty() {
-                    denied.insert(n.clone(), json!(SCOPED_LEGACY_REFUSAL));
-                    continue;
-                }
-                if let Some(root) = &h.scope.cwd {
-                    let ok = cwd.as_deref().is_some_and(|c| under(c, root));
-                    if !ok {
-                        denied.insert(n.clone(), json!(format!("lease only valid under {root}")));
+                // One whole lease serves the request; scopes are never combined.
+                let Some(to) = g.leases.pick(&n, &peer, |h| refusal(h).is_none()).map(|h| h.info.to.clone()) else {
+                    if !revision_changed && !session_mint.contains(&n)
+                        && let Some(file) = yolo_files.get(&n)
+                        && let Some((path, h)) = yolo_pick(&g, file, &peer) {
+                        deks.insert(n.clone(), json!(B64.encode(h.dek.as_ref())));
+                        log_event(p, "yolo-used", &[path.into()], json!({"folder": path, "grantee": h.info.to, "secret": n}));
                         continue;
                     }
-                }
+                    // No lease fits: report why the best lease for this caller was refused.
+                    if let Some(h) = g.leases.pick(&n, &peer, |_| true) && let Some(why) = refusal(h) {
+                        denied.insert(n.clone(), json!(why));
+                    }
+                    continue;
+                };
+                let h = g.leases.get_for_mut(&n, &to).expect("picked lease");
                 h.uses += 1;
                 deks.insert(n.clone(), json!(B64.encode(h.dek.as_ref())));
                 used.push(json!({"secret": n, "to": h.info.to_label, "expires": h.info.expires, "use": h.uses}));
                 if h.scope.max_uses.is_some_and(|m| h.uses >= m) {
-                    exhausted.push(n.clone());
+                    exhausted.push((n.clone(), to));
                 }
             }
-            for n in &exhausted {
-                g.leases.remove(n);
+            for (n, to) in &exhausted {
+                g.leases.remove_for(n, to);
             }
             drop(g);
-            if !exhausted.is_empty() {
-                log_event(p, "lease-used-up", &exhausted, json!({}));
+            for (n, to) in &exhausted {
+                log_event(p, "lease-used-up", std::slice::from_ref(n), json!({"to": to.label()}));
             }
             if !denied.is_empty() {
                 crate::audit::log(p, crate::audit::Event {
@@ -3419,41 +3752,27 @@ fn handle_effect(p: &Paths, st: &Ctx, peer: agent::Peer, req: Req, http_port: u1
             }
             Ok(json!({"ok": true}))
         }
-        Req::Revoke { patterns } => {
-            let mut g = st.lock().unwrap();
-            g.lease_revision += 1;
-            let hit: Vec<String> = g
-                .leases
-                .keys()
-                .chain(g.human.keys().map(|(_, _, name)| name))
-                .filter(|n| patterns.iter().any(|pt| store::glob_match(pt, n)))
-                .cloned()
-                .collect();
-            for n in &hit {
-                g.leases.remove(n);
-                g.human.retain(|(_, _, name), _| name != n);
-            }
-            let launches = g.pending_launches.burn_matching(&patterns);
-            g.reconcile_launch_endpoints();
-            drop(g);
-            audit_contained_launches(p, "launch-revoke", launches);
-            audit_bound_containment(p, st);
-            Ok(json!({"revoked": hit}))
-        }
+        Req::Revoke { patterns, grantee } => end_temporary(p, st, patterns, grantee, false),
+        Req::EndTemporaryAccess { patterns } => end_temporary(p, st, patterns, None, true),
         Req::List => {
             let g = st.lock().unwrap();
             let t = now();
-            let v: Vec<Value> = g
+            let mut v: Vec<Value> = g
                 .leases
-                .values()
+                .all()
                 .chain(g.human.values())
                 .filter(|h| h.info.expires > t)
                 .map(|h| {
                     let mut info = h.info.clone();
                     info.remaining = info.expires.saturating_sub(t);
-                    json!(LeaseView { info, scope: h.scope.clone(), uses: h.uses })
+                    json!(LeaseView { info, scope: h.scope.clone(), uses: h.uses, yolo: false })
                 })
                 .collect();
+            for y in g.yolos.values().filter(|y| y.info.expires > t) {
+                let mut info = y.info.clone();
+                info.remaining = info.expires.saturating_sub(t);
+                v.push(json!(LeaseView { info, scope: Scope::default(), uses: 0, yolo: true }));
+            }
             Ok(json!({"leases": v, "aws_endpoints": g.aws.len()}))
         }
         Req::AwsOpen { profile, creds, ttl } => {
@@ -5158,7 +5477,7 @@ mod tests {
         let lock = std::fs::OpenOptions::new().create(true).append(true).open(p.audit()).unwrap();
         assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
         // Lock contention (rather than the injection) must also return immediately.
-        handle(&p, &st, me, Req::Revoke { patterns: vec!["*".into()] }, 0).unwrap();
+        handle(&p, &st, me, Req::Revoke { patterns: vec!["*".into()], grantee: None }, 0).unwrap();
         audit::fail_phase(Some("all"));
         let result = sso_set_limit(&st, &p, "main", Some(15), |_| panic!("shortening must not authenticate")).unwrap();
         assert_eq!(result["asked"], false);
@@ -5397,6 +5716,604 @@ mod lease_proof_tests {
         let held = st.lock().unwrap().leases["proj/key"].scope.clone();
         assert!(matches!(&held.cmds[0], CommandBinding::Script { script_sha256, .. } if script_sha256.len() == 64));
         assert!(held.label().contains(&script), "the prompt names the script: {}", held.label());
+        std::fs::remove_dir_all(&p.root).unwrap();
+    }
+
+    // ---- several temporary accesses per secret (one per grantee) ----
+
+    fn grantee_lease(name: &str, to: Grantee, secs: u64, scope: Scope) -> Held {
+        Held {
+            info: LeaseInfo { name: name.into(), to_label: to.label(), to, granted: now(), expires: now() + secs, remaining: secs, by: "synthetic".into() },
+            dek: crypto::new_dek(), root: None, scope, uses: 0,
+        }
+    }
+
+    fn caller_of(kind: &str) -> agent::Peer {
+        agent::Peer {
+            pid: std::process::id() as i32,
+            caller: agent::Caller { agent: Some("synthetic".into()), kind: Some(kind.into()), ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    fn use_secret(p: &Paths, st: &Ctx, peer: agent::Peer, name: &str) -> Value {
+        handle_effect(p, st, peer, Req::Use { names: vec![name.into()], cmd: None }, 0).unwrap()
+    }
+
+    fn grant_to(p: &Paths, st: &Ctx, name: &str, to: Grantee, hours: f64, scope: Scope, calls: &Rc<Cell<usize>>) -> Result<Value> {
+        software_ecdh(calls.clone());
+        let r = handle(p, st, std::process::id() as i32, Req::GrantLease { names: vec![name.into()], grantee: to, hours, scope }, 0);
+        helper::ECDH_HOOK.with(|h| { h.borrow_mut().take(); });
+        r
+    }
+
+    fn start_yolo(p: &Paths, st: &Ctx, path: &str, to: Grantee, hours: f64, calls: &Rc<Cell<usize>>) -> Result<Value> {
+        software_ecdh(calls.clone());
+        let r = handle_as(p, st, agent::Peer::default(), Req::YoloStart { path: path.into(), grantee: to, hours }, 0, None, Ok);
+        helper::ECDH_HOOK.with(|h| { h.borrow_mut().take(); });
+        r
+    }
+
+    fn mutate(p: &Paths, st: &Ctx, req: Req) -> Value {
+        handle_as(p, st, agent::Peer::default(), req, 0, None, Ok).unwrap()
+    }
+
+    #[test]
+    fn yolo_end_all_is_atomic_and_does_not_depend_on_listing() {
+        let (p, st) = grant_fixture("yolo-end-all", &["proj/key".into(), "other/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        for to in [Grantee::Any, Grantee::Kind("pi".into())] {
+            grant_to(&p, &st, "proj/key", to.clone(), 2.0, Scope::default(), &calls).unwrap();
+            start_yolo(&p, &st, "proj", to, 6.0, &calls).unwrap();
+        }
+        start_yolo(&p, &st, "other", Grantee::Any, 6.0, &calls).unwrap();
+        for name in ["proj/key", "other/key"] {
+            st.lock().unwrap().human.insert((1, 2, name.into()), grantee_lease(name, Grantee::Human, 600, Scope::default()));
+        }
+        let st = Rc::new(st);
+        let state = st.clone();
+        REQUEST_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move |paths, req| {
+            if matches!(req, Req::YoloList) { bail!("injected list failure"); }
+            handle_as(paths, &state, agent::Peer::default(), serde_json::from_value(serde_json::to_value(req)?)?, 0, None, Ok)
+        })));
+        let v = peer_vault(&p, &agent::Peer::default()).unwrap();
+        assert!(v.yolos().unwrap_err().to_string().contains("injected list failure"));
+        assert_eq!(st.lock().unwrap().yolos.len(), 3);
+        // Even unverifiable coverage must not hide future enrollment authority.
+        std::fs::remove_file(p.secret("proj/key").unwrap()).unwrap();
+        let ended = v.end_temporary_access(&["proj/".into()]).unwrap();
+        assert!(ended.contains(&"proj/".into()));
+        assert!(st.lock().unwrap().yolos.keys().all(|(path, _)| path == "other"));
+        assert!(st.lock().unwrap().leases.is_empty(), "folder selection ends per-key authority too");
+        assert_eq!(st.lock().unwrap().human.len(), 1, "folder selection removes only its human cache entries");
+        assert!(st.lock().unwrap().human.keys().all(|(_, _, name)| name == "other/key"));
+        v.end_temporary_access(&["*".into()]).unwrap();
+        assert!(st.lock().unwrap().yolos.is_empty());
+        assert!(st.lock().unwrap().leases.is_empty());
+        assert!(st.lock().unwrap().human.is_empty());
+        assert!(use_secret(&p, &st, caller_of("pi"), "other/key")["deks"]["other/key"].is_null());
+        REQUEST_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|_, _| Ok(json!({"yolos": "invalid"})))));
+        assert!(v.yolos().is_err(), "malformed metadata is not an empty list");
+        REQUEST_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|_, _| bail!("injected end failure"))));
+        assert!(v.end_temporary_access(&["*".into()]).is_err());
+        REQUEST_HOOK.with(|h| { h.borrow_mut().take(); });
+        let events = audit::read(&p, usize::MAX).unwrap();
+        assert_eq!(events.iter().filter(|e| e["action"] == "yolo-end").count(), 3);
+        assert!(events.iter().any(|e| e["action"] == "revoke"));
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_end_temporary_distinguishes_exact_key_from_same_named_folder() {
+        let (p, st) = grant_fixture("yolo-end-key-folder", &["stripe".into(), "stripe/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        grant_to(&p, &st, "stripe", Grantee::Any, 2.0, Scope::default(), &calls).unwrap();
+        start_yolo(&p, &st, "stripe", Grantee::Any, 6.0, &calls).unwrap();
+        mutate(&p, &st, Req::EndTemporaryAccess { patterns: vec!["stripe".into()] });
+        assert!(st.lock().unwrap().leases.is_empty(), "exact key access ends");
+        assert_eq!(st.lock().unwrap().yolos.len(), 1, "same-named folder keeps its YOLO");
+        assert!(use_secret(&p, &st, caller_of("pi"), "stripe")["deks"]["stripe"].is_null());
+        assert!(use_secret(&p, &st, caller_of("pi"), "stripe/key")["deks"]["stripe/key"].is_string());
+        mutate(&p, &st, Req::EndTemporaryAccess { patterns: vec!["stripe/key".into()] });
+        assert!(st.lock().unwrap().yolos.is_empty(), "descendant key ends its ancestor YOLO");
+        start_yolo(&p, &st, "stripe", Grantee::Any, 6.0, &calls).unwrap();
+        mutate(&p, &st, Req::EndTemporaryAccess { patterns: vec!["stripe/".into()] });
+        assert!(st.lock().unwrap().yolos.is_empty(), "explicit folder selector ends its YOLO");
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_end_all_key_selection_ends_whole_ancestor_records_only() {
+        let (p, st) = grant_fixture("yolo-end-key", &["proj/sub/key".into(), "other/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        for path in ["proj", "proj/sub", "other"] {
+            start_yolo(&p, &st, path, Grantee::Any, 6.0, &calls).unwrap();
+        }
+        for ((path, _), y) in &mut st.lock().unwrap().yolos { if path != "other" { y.keys.clear(); } }
+        mutate(&p, &st, Req::EndTemporaryAccess { patterns: vec!["proj/sub/key".into()] });
+        assert_eq!(st.lock().unwrap().yolos.len(), 1);
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/sub/key")["deks"]["proj/sub/key"].is_null());
+        assert!(use_secret(&p, &st, caller_of("pi"), "other/key")["deks"]["other/key"].is_string());
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_path_boundaries_reject_siblings_traversal_and_case_widening() {
+        let names = ["stripe/key", "stripe2/x", "stripex", "Stripe/case"];
+        let (p, st) = grant_fixture("yolo-boundaries", &names.map(String::from));
+        let calls = Rc::new(Cell::new(0));
+        start_yolo(&p, &st, "stripe", Grantee::Any, 6.0, &calls).unwrap();
+        assert!(use_secret(&p, &st, caller_of("pi"), names[0])["deks"][names[0]].is_string());
+        for name in &names[1..] {
+            assert!(use_secret(&p, &st, caller_of("pi"), name)["deks"][name].is_null(), "{name}");
+        }
+        for name in ["stripe/../stripe2/x", "../stripe/key", "stripe/./key", "stripe//key"] {
+            assert!(store::validate_name(name).is_err(), "{name}");
+            assert!(start_yolo(&p, &st, name, Grantee::Any, 6.0, &calls).is_err());
+        }
+        assert_eq!(yolo_views(&p, &st)[0].covered, ["stripe/key"]);
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_policy_tightening_forgets_key_but_keeps_other_coverage() {
+        let (p, st) = grant_fixture("yolo-tighten", &["proj/other".into()]);
+        std::fs::write(p.keys().join("bio.key"), b"synthetic").unwrap();
+        std::fs::write(p.keys().join("open.key"), b"synthetic").unwrap();
+        let v = peer_vault(&p, &agent::Peer::default()).unwrap();
+        let file = v.build_file("proj/key", store::Tier::Open, true, false, &crypto::new_dek(), b"synthetic", &v.pubkeys_local().unwrap(), None).unwrap();
+        store::save_secret(&p, &file).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        start_yolo(&p, &st, "proj", Grantee::Any, 6.0, &calls).unwrap();
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_string());
+        software_ecdh(calls.clone());
+        mutate(&p, &st, Req::ChangePolicy { patterns: vec!["proj/key".into()], tier: Some(store::Tier::Bio), agent_allowed: Some(false), public: None });
+        helper::ECDH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert!(st.lock().unwrap().yolos.values().all(|y| !y.keys.contains_key("proj/key")));
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_null());
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/other")["deks"]["proj/other"].is_string());
+        assert_eq!(yolo_views(&p, &st)[0].covered, ["proj/other"]);
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_mutations_enroll_multiple_ancestors_and_grantees() {
+        let (p, st) = grant_fixture("yolo-multi-enroll", &["proj/sub/key".into(), "outside/key".into()]);
+        std::fs::write(p.keys().join("bio.key"), b"synthetic").unwrap();
+        std::fs::write(p.keys().join("open.key"), b"synthetic").unwrap();
+        let calls = Rc::new(Cell::new(0));
+        for path in ["proj", "proj/sub"] {
+            for to in [Grantee::Any, Grantee::Kind("pi".into()), Grantee::Kind("claude".into())] {
+                start_yolo(&p, &st, path, to, 6.0, &calls).unwrap();
+            }
+        }
+        helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|| Ok(()))));
+        mutate(&p, &st, Req::Add { name: "proj/sub/added".into(), value: B64.encode("synthetic added"), tier: Some(store::Tier::Bio), agent_allowed: false, public: false, overwrite: false });
+        helper::AUTH_HOOK.with(|h| { h.borrow_mut().take(); });
+        software_ecdh(calls.clone());
+        mutate(&p, &st, Req::Rename { from: "outside/key".into(), to: "proj/sub/moved".into() });
+        helper::ECDH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert_eq!(st.lock().unwrap().yolos.len(), 6);
+        for y in yolo_views(&p, &st) {
+            assert_eq!(y.covered, ["proj/sub/added", "proj/sub/key", "proj/sub/moved"]);
+            assert!(y.added.contains(&"proj/sub/added".into()));
+            // Exercise each whole record independently, not a union of records.
+            let held = st.lock().unwrap().yolos[&(y.path, y.to)].keys["proj/sub/moved"].1.dek.clone();
+            assert_eq!(crypto::open(&held, &store::load_secret(&p, "proj/sub/moved").unwrap()).unwrap().as_slice(), b"synthetic grant");
+        }
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_only_me_is_grantee_only_and_keeps_public_and_at_rest_levels() {
+        let (p, st) = grant_fixture("yolo-only-me", &["proj/key".into()]);
+        let v = peer_vault(&p, &agent::Peer::default()).unwrap();
+        let public = v.build_file("proj/public", store::Tier::Open, true, true, &crypto::new_dek(), b"public", &v.pubkeys_local().unwrap(), None).unwrap();
+        store::save_secret(&p, &public).unwrap();
+        let before = std::fs::read(p.secret("proj/key").unwrap()).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let to = Grantee::Kind("pi".into());
+        let result = start_yolo(&p, &st, "proj/", to.clone(), 6.0, &calls).unwrap();
+        assert_eq!(calls.get(), 1, "one Bio batch = one Touch ID");
+        assert_eq!(result["yolos"][0]["covered"], json!(["proj/key"]));
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_string());
+        assert!(use_secret(&p, &st, caller_of("claude"), "proj/key")["deks"]["proj/key"].is_null());
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/public")["deks"]["proj/public"].is_null());
+        mutate(&p, &st, Req::YoloEnd { path: "proj".into(), grantee: Some(to) });
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_null());
+        assert_eq!(before, std::fs::read(p.secret("proj/key").unwrap()).unwrap(), "no rewrap");
+        assert_eq!(public, store::load_secret(&p, "proj/public").unwrap());
+        let events = audit::read(&p, usize::MAX).unwrap();
+        for action in ["yolo-start", "yolo-used", "yolo-end"] {
+            assert!(events.iter().any(|e| e["action"] == action && e["detail"]["folder"] == "proj" && e["detail"]["grantee"] == json!(Grantee::Kind("pi".into()))), "{action}");
+        }
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_add_and_new_value_join_through_daemon_callbacks() {
+        let (p, st) = grant_fixture("yolo-add", &["proj/key".into()]);
+        std::fs::write(p.keys().join("bio.key"), b"synthetic").unwrap();
+        std::fs::write(p.keys().join("open.key"), b"synthetic").unwrap();
+        let calls = Rc::new(Cell::new(0));
+        start_yolo(&p, &st, "proj", Grantee::Any, 6.0, &calls).unwrap();
+        for (name, overwrite, value) in [("proj/added", false, "added"), ("proj/key", true, "new value"), ("proj/added", true, "added replacement")] {
+            helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|| Ok(()))));
+            mutate(&p, &st, Req::Add { name: name.into(), value: B64.encode(value), tier: Some(store::Tier::Bio), agent_allowed: false, public: false, overwrite });
+            let response = use_secret(&p, &st, caller_of("pi"), name);
+            let raw = B64.decode(response["deks"][name].as_str().unwrap()).unwrap();
+            let mut dek = Zeroizing::new([0u8;32]); dek.copy_from_slice(&raw);
+            assert_eq!(crypto::open(&dek, &store::load_secret(&p, name).unwrap()).unwrap().as_slice(), value.as_bytes());
+        }
+        helper::AUTH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert_eq!(yolo_views(&p, &st)[0].covered, ["proj/added", "proj/key"]);
+        assert_eq!(yolo_views(&p, &st)[0].added, ["proj/added"], "same-second additions are marked explicitly");
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_rename_into_subtree_is_covered_and_moving_out_removes_coverage() {
+        let (p, st) = grant_fixture("yolo-move", &["outside/key".into(), "proj/key".into()]);
+        std::fs::write(p.keys().join("bio.key"), b"synthetic").unwrap();
+        std::fs::write(p.keys().join("open.key"), b"synthetic").unwrap();
+        let calls = Rc::new(Cell::new(0));
+        start_yolo(&p, &st, "proj", Grantee::Any, 6.0, &calls).unwrap();
+        software_ecdh(calls.clone());
+        mutate(&p, &st, Req::Rename { from: "outside/key".into(), to: "proj/sub/moved".into() });
+        software_ecdh(calls.clone());
+        mutate(&p, &st, Req::Rename { from: "proj/key".into(), to: "outside/moved".into() });
+        helper::ECDH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/sub/moved")["deks"]["proj/sub/moved"].is_string());
+        for name in ["proj/key", "outside/moved", "outside/key"] {
+            assert!(use_secret(&p, &st, caller_of("pi"), name)["deks"][name].is_null(), "{name}");
+        }
+        assert_eq!(yolo_views(&p, &st)[0].covered, ["proj/sub/moved"]);
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_unobserved_files_fail_closed_and_are_not_listed_as_covered() {
+        let (p, st) = grant_fixture("yolo-unobserved", &["proj/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        start_yolo(&p, &st, "proj", Grantee::Any, 6.0, &calls).unwrap();
+        let v = peer_vault(&p, &agent::Peer::default()).unwrap();
+        let f = v.build_file("proj/key", store::Tier::Bio, false, false, &crypto::new_dek(), b"outside daemon", &v.pubkeys_local().unwrap(), None).unwrap();
+        store::save_secret(&p, &f).unwrap();
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_null());
+        assert!(yolo_views(&p, &st)[0].covered.is_empty());
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_replacement_end_one_and_end_all_leave_per_key_access_alone() {
+        let (p, st) = grant_fixture("yolo-replace", &["proj/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        let pi = Grantee::Kind("pi".into());
+        grant_to(&p, &st, "proj/key", pi.clone(), 2.0, Scope::default(), &calls).unwrap();
+        start_yolo(&p, &st, "proj", pi.clone(), 1.0, &calls).unwrap();
+        start_yolo(&p, &st, "proj", Grantee::Any, 3.0, &calls).unwrap();
+        start_yolo(&p, &st, "proj", pi.clone(), 6.0, &calls).unwrap();
+        assert_eq!(calls.get(), 4);
+        assert_eq!(st.lock().unwrap().yolos.len(), 2);
+        assert_eq!(st.lock().unwrap().yolos[&("proj".into(), pi.clone())].info.expires - now(), 21600);
+        mutate(&p, &st, Req::YoloEnd { path: "proj".into(), grantee: Some(pi.clone()) });
+        assert_eq!(st.lock().unwrap().yolos.len(), 1);
+        assert_eq!(holders(&st, "proj/key"), std::slice::from_ref(&pi));
+        mutate(&p, &st, Req::YoloEnd { path: "proj".into(), grantee: None });
+        assert!(st.lock().unwrap().yolos.is_empty());
+        assert_eq!(holders(&st, "proj/key"), [pi]);
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_expiry_block_and_restart_end_authority_but_screen_lock_does_not() {
+        let (p, st) = grant_fixture("yolo-endings", &["proj/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        start_yolo(&p, &st, "proj", Grantee::Any, 1.0 / 3600.0, &calls).unwrap();
+        assert!(st.lock().unwrap().keeps_alive(now()));
+        let end = st.lock().unwrap().yolos.values().next().unwrap().info.expires;
+        expire_leases(&p, &st, end);
+        assert!(st.lock().unwrap().yolos.is_empty());
+        assert!(audit::read(&p, usize::MAX).unwrap().iter().any(|e| e["action"] == "yolo-expired"));
+        start_yolo(&p, &st, "proj", Grantee::Any, 6.0, &calls).unwrap();
+        st.lock().unwrap().human.insert((1, 2, "proj/key".into()), grantee_lease("proj/key", Grantee::Human, 600, Scope::default()));
+        helper::ECDH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|_| bail!("screen locked"))));
+        assert!(!check_human_cache_screen(&p, &st));
+        assert!(st.lock().unwrap().human.is_empty(), "screen lock ends the human cache");
+        assert_eq!(st.lock().unwrap().yolos.len(), 1, "screen lock keeps YOLO");
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_string());
+        helper::ECDH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert!(use_secret(&p, &Ctx::new(State::default()), caller_of("pi"), "proj/key")["deks"]["proj/key"].is_null(), "restart loses RAM authority");
+        helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|| Ok(()))));
+        mutate(&p, &st, Req::Kill { agent: None, session: None, all: true, revive: false });
+        helper::AUTH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert!(st.lock().unwrap().yolos.is_empty());
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_is_separate_from_eight_cap_and_never_merges_access_scopes() {
+        let (p, st) = grant_fixture("yolo-cap", &["proj/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        for i in 0..8 { grant_to(&p, &st, "proj/key", Grantee::Kind(format!("agent{i}")), 1.0, Scope::default(), &calls).unwrap(); }
+        start_yolo(&p, &st, "proj", Grantee::Kind("claude".into()), 6.0, &calls).unwrap();
+        assert_eq!(holders(&st, "proj/key").len(), 8);
+        assert_eq!(st.lock().unwrap().yolos.len(), 1);
+        assert!(use_secret(&p, &st, caller_of("claude"), "proj/key")["deks"]["proj/key"].is_string());
+        assert_eq!(st.lock().unwrap().leases.all().map(|h| h.uses).sum::<u32>(), 0);
+        revoke(&p, &st, "proj/key", None);
+        grant_to(&p, &st, "proj/key", Grantee::Kind("pi".into()), 1.0, Scope { cwd: Some(p.root.to_string_lossy().into_owned()), ..Scope::default() }, &calls).unwrap();
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_null(), "claude's YOLO never supplies pi's missing scope");
+        start_yolo(&p, &st, "proj", Grantee::Kind("pi".into()), 6.0, &calls).unwrap();
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_string(), "one whole YOLO can serve independently");
+        assert_eq!(uses_of(&st, "proj/key", &Grantee::Kind("pi".into())), 0);
+        grant_to(&p, &st, "proj/key", Grantee::Kind("pi".into()), 1.0, Scope::default(), &calls).unwrap();
+        use_secret(&p, &st, caller_of("pi"), "proj/key");
+        assert_eq!(uses_of(&st, "proj/key", &Grantee::Kind("pi".into())), 1, "per-key access wins before YOLO");
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_nested_pick_uses_grantee_then_depth_then_end() {
+        let (p, st) = grant_fixture("yolo-rank", &["proj/sub/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        let kind = Grantee::Kind("pi".into());
+        start_yolo(&p, &st, "proj", kind.clone(), 1.0, &calls).unwrap();
+        start_yolo(&p, &st, "proj/sub", Grantee::Any, 1.0, &calls).unwrap();
+        let f = store::load_secret(&p, "proj/sub/key").unwrap();
+        let mut peer = caller_of("pi");
+        assert_eq!(yolo_pick(&st.lock().unwrap(), &f, &peer).unwrap().0, "proj", "kind outranks deeper any");
+        start_yolo(&p, &st, "proj/sub", kind, 6.0, &calls).unwrap();
+        assert_eq!(yolo_pick(&st.lock().unwrap(), &f, &peer).unwrap().0, "proj/sub", "depth outranks sooner end");
+        let me = std::process::id() as i32;
+        let start = agent::proc_start(me).unwrap();
+        peer.ancestors = vec![(me, start)];
+        for (suffix, hours) in [("", 4.0), ("@root", 2.0)] {
+            // Two session labels may resolve to the same approved process root.
+            let to = Grantee::Session(format!("session{suffix}"));
+            let mut info = st.lock().unwrap().yolos.values().next().unwrap().info.clone();
+            info.to = to.clone(); info.expires = now() + (hours * 3600.0) as u64;
+            st.lock().unwrap().yolos.insert(("proj".into(), to), Yolo { info, root: Some((me, start)), keys: HashMap::new(), added: Default::default() });
+        }
+        let dek = st.lock().unwrap().yolos[&("proj".into(), Grantee::Kind("pi".into()))].keys[&f.name].1.dek.clone();
+        yolo_enroll(&mut st.lock().unwrap(), &f, &dek, false);
+        let g = st.lock().unwrap();
+        let (path, held) = yolo_pick(&g, &f, &peer).unwrap();
+        assert_eq!(path, "proj", "session outranks deeper kind");
+        assert_eq!(held.info.to, Grantee::Session("session@root".into()), "soonest session wins");
+        drop(g);
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_wire_refuses_dek_injection_and_agent_start_before_auth() {
+        for op in ["yolo_enroll", "yolo_forget"] {
+            assert!(serde_json::from_value::<Req>(json!({"op": op, "names": [], "file": {}, "dek": "claimed"})).is_err());
+        }
+        let (p, st) = grant_fixture("yolo-fence", &["proj/key".into()]);
+        let injection = Req::YoloEnroll { file: store::load_secret(&p, "proj/key").unwrap(), dek: B64.encode([0u8; 32]), added: true };
+        assert!(serde_json::from_value::<Req>(serde_json::to_value(injection).unwrap()).is_err(), "even a well-formed enrollment cannot enter from the wire");
+        helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|| panic!("agent must not prompt"))));
+        let req: Req = serde_json::from_value(json!({"op":"yolo_start", "path":"proj", "to":{"type":"any"}, "hours":6})).unwrap();
+        assert!(handle_effect(&p, &st, caller_of("pi"), req, 0).unwrap_err().to_string().contains("human-only"));
+        helper::AUTH_HOOK.with(|h| { h.borrow_mut().take(); });
+        let calls = Rc::new(Cell::new(0));
+        for (path, hours) in [("aws", 6.0), ("sources/a", 6.0), ("proj", 169.0), ("proj", f64::NAN), ("proj", 0.0)] {
+            assert!(start_yolo(&p, &st, path, Grantee::Any, hours, &calls).is_err());
+        }
+        assert_eq!(calls.get(), 0);
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_open_only_start_authenticates_once_and_list_marks_folder_row() {
+        let (p, st) = grant_fixture("yolo-open", &[]);
+        let v = peer_vault(&p, &agent::Peer::default()).unwrap();
+        let f = v.build_file("proj/open", store::Tier::Open, true, false, &crypto::new_dek(), b"open", &v.pubkeys_local().unwrap(), None).unwrap();
+        store::save_secret(&p, &f).unwrap();
+        let auth = Rc::new(Cell::new(0)); let count = auth.clone();
+        helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move || { count.set(count.get()+1); Ok(()) })));
+        let calls = Rc::new(Cell::new(0));
+        start_yolo(&p, &st, "proj", Grantee::Any, 6.0, &calls).unwrap();
+        helper::AUTH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert_eq!(auth.get(), 1, "Open ECDH itself does not authenticate");
+        let list = mutate(&p, &st, Req::List);
+        assert_eq!(list["leases"][0]["name"], "proj/");
+        assert_eq!(list["leases"][0]["yolo"], true);
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    fn expiry_of(st: &Ctx, name: &str, to: &Grantee) -> u64 { st.lock().unwrap().leases.0[name][to].info.expires }
+    fn uses_of(st: &Ctx, name: &str, to: &Grantee) -> u32 { st.lock().unwrap().leases.0[name][to].uses }
+    fn holders(st: &Ctx, name: &str) -> Vec<Grantee> {
+        st.lock().unwrap().leases.0.get(name).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    }
+    fn revoke(p: &Paths, st: &Ctx, name: &str, to: Option<Grantee>) -> Vec<String> {
+        let r = handle(p, st, std::process::id() as i32, Req::Revoke { patterns: vec![name.into()], grantee: to }, 0).unwrap();
+        serde_json::from_value(r["revoked"].clone()).unwrap()
+    }
+
+    #[test]
+    fn two_grantees_coexist_and_regrant_replaces_only_the_same_grantee() {
+        let (p, st) = grant_fixture("multi-grant", &["proj/key".to_string()]);
+        let calls = Rc::new(Cell::new(0));
+        let (pi, claude) = (Grantee::Kind("pi".into()), Grantee::Kind("claude".into()));
+        grant_to(&p, &st, "proj/key", pi.clone(), 1.0, Scope { max_uses: Some(5), ..Scope::default() }, &calls).unwrap();
+        grant_to(&p, &st, "proj/key", claude.clone(), 3.0, Scope::default(), &calls).unwrap();
+        assert_eq!(calls.get(), 2, "one Touch ID per grant");
+        assert_eq!(holders(&st, "proj/key").len(), 2);
+        let (pi_end, claude_end) = (expiry_of(&st, "proj/key", &pi), expiry_of(&st, "proj/key", &claude));
+        assert!(claude_end > pi_end + 3600, "different windows: {pi_end} vs {claude_end}");
+        // Use spends only the caller's own access.
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_string());
+        assert!(use_secret(&p, &st, caller_of("claude"), "proj/key")["deks"]["proj/key"].is_string());
+        assert!(use_secret(&p, &st, caller_of("claude"), "proj/key")["deks"]["proj/key"].is_string());
+        assert_eq!((uses_of(&st, "proj/key", &pi), uses_of(&st, "proj/key", &claude)), (1, 2));
+        // Regrant to pi resets only pi: new window, new scope, use count 0. claude is untouched.
+        grant_to(&p, &st, "proj/key", pi.clone(), 2.0, Scope { max_uses: Some(9), ..Scope::default() }, &calls).unwrap();
+        assert_eq!(holders(&st, "proj/key").len(), 2);
+        assert_eq!(uses_of(&st, "proj/key", &pi), 0);
+        assert_eq!(st.lock().unwrap().leases.0["proj/key"][&pi].scope.max_uses, Some(9));
+        assert!(expiry_of(&st, "proj/key", &pi) > pi_end + 3000);
+        assert_eq!((uses_of(&st, "proj/key", &claude), expiry_of(&st, "proj/key", &claude)), (2, claude_end));
+        std::fs::remove_dir_all(&p.root).unwrap();
+    }
+
+    #[test]
+    fn ninth_grantee_is_refused_before_any_prompt_and_state_is_unchanged() {
+        let (p, st) = grant_fixture("multi-cap", &["proj/key".to_string()]);
+        let calls = Rc::new(Cell::new(0));
+        let kinds: Vec<Grantee> = (0..crate::lease::MAX_PER_SECRET).map(|i| Grantee::Kind(format!("agent{i}"))).collect();
+        for to in &kinds { grant_to(&p, &st, "proj/key", to.clone(), 1.0, Scope::default(), &calls).unwrap(); }
+        assert_eq!(calls.get(), 8);
+        let before: Vec<(Grantee, u64, u32)> = kinds.iter().map(|k| (k.clone(), expiry_of(&st, "proj/key", k), uses_of(&st, "proj/key", k))).collect();
+        let revision = st.lock().unwrap().lease_revision;
+        let prompts = Rc::new(Cell::new(0));
+        let counter = prompts.clone();
+        helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move || { counter.set(counter.get() + 1); Ok(()) })));
+        let ecdh = Rc::new(Cell::new(0));
+        let error = grant_to(&p, &st, "proj/key", Grantee::Kind("ninth".into()), 1.0, Scope::default(), &ecdh).unwrap_err().to_string();
+        helper::AUTH_HOOK.with(|h| { h.borrow_mut().take(); });
+        assert!(error.contains("8 temporary accesses"), "{error}");
+        assert_eq!((prompts.get(), ecdh.get()), (0, 0), "no Touch ID prompt for a refused 9th access");
+        assert_eq!(holders(&st, "proj/key").len(), 8);
+        assert!(!holders(&st, "proj/key").contains(&Grantee::Kind("ninth".into())));
+        let after: Vec<(Grantee, u64, u32)> = kinds.iter().map(|k| (k.clone(), expiry_of(&st, "proj/key", k), uses_of(&st, "proj/key", k))).collect();
+        assert_eq!(before, after);
+        assert_eq!(st.lock().unwrap().lease_revision, revision);
+        // A regrant to an existing grantee still works at the cap.
+        grant_to(&p, &st, "proj/key", kinds[3].clone(), 2.0, Scope::default(), &calls).unwrap();
+        assert_eq!(holders(&st, "proj/key").len(), 8);
+        // Ending one makes room.
+        assert_eq!(revoke(&p, &st, "proj/key", Some(kinds[0].clone())), ["proj/key"]);
+        grant_to(&p, &st, "proj/key", Grantee::Kind("ninth".into()), 1.0, Scope::default(), &calls).unwrap();
+        assert_eq!(holders(&st, "proj/key").len(), 8);
+        std::fs::remove_dir_all(&p.root).unwrap();
+    }
+
+    #[test]
+    fn revoke_with_grantee_ends_one_and_without_ends_all() {
+        let (p, st) = grant_fixture("multi-revoke", &["proj/key".to_string(), "proj/other".to_string()]);
+        let calls = Rc::new(Cell::new(0));
+        let (pi, claude) = (Grantee::Kind("pi".into()), Grantee::Kind("claude".into()));
+        for name in ["proj/key", "proj/other"] {
+            for to in [&pi, &claude, &Grantee::Any] { grant_to(&p, &st, name, to.clone(), 1.0, Scope::default(), &calls).unwrap(); }
+        }
+        assert_eq!(revoke(&p, &st, "proj/key", Some(pi.clone())), ["proj/key"]);
+        assert_eq!(holders(&st, "proj/key").len(), 2);
+        assert_eq!(holders(&st, "proj/other").len(), 3, "another secret is untouched");
+        assert!(revoke(&p, &st, "proj/key", Some(pi.clone())).is_empty(), "nothing left for pi");
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_string(), "any still covers pi");
+        assert_eq!(revoke(&p, &st, "proj/key", None), ["proj/key"]);
+        assert!(holders(&st, "proj/key").is_empty());
+        assert_eq!(holders(&st, "proj/other").len(), 3);
+        // A glob with a grantee ends that grantee on every match.
+        assert_eq!(revoke(&p, &st, "proj/*", Some(claude.clone())), ["proj/other"]);
+        assert_eq!(holders(&st, "proj/other"), [Grantee::Any, pi.clone()]);
+        // Ending the human's cached unlock leaves every agent access alone.
+        st.lock().unwrap().human.insert((1, 2, "proj/other".into()), grantee_lease("proj/other", Grantee::Human, 600, Scope::default()));
+        assert_eq!(revoke(&p, &st, "proj/other", Some(Grantee::Human)), ["proj/other"]);
+        assert!(st.lock().unwrap().human.is_empty());
+        assert_eq!(holders(&st, "proj/other"), [Grantee::Any, pi.clone()]);
+        std::fs::remove_dir_all(&p.root).unwrap();
+    }
+
+    #[test]
+    fn use_picks_matching_grantee_and_never_combines_scopes() {
+        let p = Paths { root: std::env::temp_dir().join(format!("karambit-multi-use-{}", std::process::id())) };
+        store::ensure_dir(&p.root).unwrap();
+        let st = Ctx::new(State::default());
+        let here = canon_dir(&std::env::current_dir().unwrap().to_string_lossy());
+        let (pi, claude) = (Grantee::Kind("pi".into()), Grantee::Kind("claude".into()));
+        let put = |h: Held| st.lock().unwrap().leases.put(h).unwrap();
+        // pi: only under a folder this caller is not in. any: command-scoped (legacy Use refuses it).
+        put(grantee_lease("proj/key", pi.clone(), 3600, Scope { cwd: Some("/nonexistent-karambit-folder".into()), ..Scope::default() }));
+        put(grantee_lease("proj/key", Grantee::Any, 3600, Scope { cmds: vec![CommandBinding::from("/usr/bin/true").pin().unwrap()], ..Scope::default() }));
+        put(grantee_lease("proj/key", claude.clone(), 3600, Scope { cwd: Some(here.clone()), ..Scope::default() }));
+        // The request fits no single access, even though cwd-from-claude plus cmd-from-any would "fit" if merged.
+        let r = use_secret(&p, &st, caller_of("pi"), "proj/key");
+        assert!(r["deks"]["proj/key"].is_null(), "{r}");
+        assert!(r["denied"]["proj/key"].as_str().unwrap().contains("only valid under"), "{r}");
+        // A caller no access names gets the any-agent access, which legacy Use refuses; nothing is released.
+        let r = use_secret(&p, &st, caller_of("codex"), "proj/key");
+        assert!(r["deks"]["proj/key"].is_null());
+        assert!(r["denied"]["proj/key"].as_str().unwrap().contains("karambit run"), "{r}");
+        // claude fits its own access.
+        let r = use_secret(&p, &st, caller_of("claude"), "proj/key");
+        assert!(r["deks"]["proj/key"].is_string(), "{r}");
+        assert_eq!(r["via"][0]["to"], "claude agents");
+        assert_eq!((uses_of(&st, "proj/key", &pi), uses_of(&st, "proj/key", &Grantee::Any), uses_of(&st, "proj/key", &claude)), (0, 0, 1));
+        // Another fitting access keeps working when the best-ranked one does not fit.
+        put(grantee_lease("proj/open", pi.clone(), 3600, Scope { cwd: Some("/nonexistent-karambit-folder".into()), ..Scope::default() }));
+        put(grantee_lease("proj/open", Grantee::Any, 3600, Scope::default()));
+        let r = use_secret(&p, &st, caller_of("pi"), "proj/open");
+        assert!(r["deks"]["proj/open"].is_string(), "{r}");
+        assert_eq!(r["via"][0]["to"], "any agent");
+        assert_eq!((uses_of(&st, "proj/open", &pi), uses_of(&st, "proj/open", &Grantee::Any)), (0, 1));
+        std::fs::remove_dir_all(&p.root).unwrap();
+    }
+
+    #[test]
+    fn use_prefers_most_specific_grantee_then_soonest_end() {
+        let p = Paths { root: std::env::temp_dir().join(format!("karambit-multi-rank-{}", std::process::id())) };
+        store::ensure_dir(&p.root).unwrap();
+        let st = Ctx::new(State::default());
+        let pi = Grantee::Kind("pi".into());
+        // any ends first, pi ends later: the more specific pi wins.
+        st.lock().unwrap().leases.put(grantee_lease("proj/key", Grantee::Any, 600, Scope::default())).unwrap();
+        st.lock().unwrap().leases.put(grantee_lease("proj/key", pi.clone(), 7200, Scope::default())).unwrap();
+        assert_eq!(use_secret(&p, &st, caller_of("pi"), "proj/key")["via"][0]["to"], "pi agents");
+        assert_eq!((uses_of(&st, "proj/key", &Grantee::Any), uses_of(&st, "proj/key", &pi)), (0, 1));
+        // A session grantee outranks a kind grantee. Its root is this test process, an ancestor of the peer.
+        let me = std::process::id() as i32;
+        let start = agent::proc_start(me).unwrap();
+        let mut session = grantee_lease("proj/key", Grantee::Session(format!("pid:{me}@{start}")), 9000, Scope::default());
+        session.root = Some((me, start));
+        st.lock().unwrap().leases.put(session).unwrap();
+        let mut peer = caller_of("pi");
+        peer.ancestors = vec![(me, start)];
+        assert_eq!(use_secret(&p, &st, peer, "proj/key")["via"][0]["to"], format!("session pid:{me}@{start}"));
+        // An expired access never serves, even when it is the most specific.
+        st.lock().unwrap().leases.get_for_mut("proj/key", &pi).unwrap().info.expires = now();
+        assert_eq!(use_secret(&p, &st, caller_of("pi"), "proj/key")["via"][0]["to"], "any agent");
+        std::fs::remove_dir_all(&p.root).unwrap();
+    }
+
+    #[test]
+    fn max_uses_counts_per_access_and_ends_only_that_access() {
+        let p = Paths { root: std::env::temp_dir().join(format!("karambit-multi-uses-{}", std::process::id())) };
+        store::ensure_dir(&p.root).unwrap();
+        let st = Ctx::new(State::default());
+        let (pi, claude) = (Grantee::Kind("pi".into()), Grantee::Kind("claude".into()));
+        st.lock().unwrap().leases.put(grantee_lease("proj/key", pi.clone(), 3600, Scope { max_uses: Some(1), ..Scope::default() })).unwrap();
+        st.lock().unwrap().leases.put(grantee_lease("proj/key", claude.clone(), 3600, Scope { max_uses: Some(2), ..Scope::default() })).unwrap();
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_string());
+        assert_eq!(holders(&st, "proj/key"), std::slice::from_ref(&claude), "pi's last use ended pi's access only");
+        assert!(use_secret(&p, &st, caller_of("pi"), "proj/key")["deks"]["proj/key"].is_null());
+        assert!(use_secret(&p, &st, caller_of("claude"), "proj/key")["deks"]["proj/key"].is_string());
+        assert_eq!(uses_of(&st, "proj/key", &claude), 1);
+        assert!(use_secret(&p, &st, caller_of("claude"), "proj/key")["deks"]["proj/key"].is_string());
+        assert!(holders(&st, "proj/key").is_empty());
+        let log = std::fs::read_to_string(p.audit()).unwrap();
+        let used_up: Vec<_> = log.lines().filter(|l| l.contains("lease-used-up")).collect();
+        assert_eq!(used_up.len(), 2);
+        assert!(used_up[0].contains("pi agents") && used_up[1].contains("claude agents"), "{used_up:?}");
+        std::fs::remove_dir_all(&p.root).unwrap();
+    }
+
+    #[test]
+    fn expiry_ends_only_the_expired_access_and_audits_the_grantee() {
+        let p = Paths { root: std::env::temp_dir().join(format!("karambit-multi-expiry-{}", std::process::id())) };
+        store::ensure_dir(&p.root).unwrap();
+        let st = Ctx::new(State::default());
+        let (pi, claude) = (Grantee::Kind("pi".into()), Grantee::Kind("claude".into()));
+        st.lock().unwrap().leases.put(grantee_lease("proj/key", pi.clone(), 60, Scope::default())).unwrap();
+        st.lock().unwrap().leases.put(grantee_lease("proj/key", claude.clone(), 3600, Scope::default())).unwrap();
+        expire_leases(&p, &st, now() + 120);
+        assert_eq!(holders(&st, "proj/key"), [claude]);
+        let log = std::fs::read_to_string(p.audit()).unwrap();
+        let line = log.lines().find(|l| l.contains("lease-expired")).expect("expiry audited");
+        assert!(line.contains("pi agents") && !line.contains("claude"), "{line}");
         std::fs::remove_dir_all(&p.root).unwrap();
     }
 }
@@ -5730,7 +6647,7 @@ mod unlock_routing_tests {
         let (done_tx, done_rx) = mpsc::channel();
         let state = st.clone(); let paths = p.clone();
         let revoke = std::thread::spawn(move || {
-            done_tx.send(handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()] }, 0, None, Ok).is_ok()).unwrap();
+            done_tx.send(handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()], grantee: None }, 0, None, Ok).is_ok()).unwrap();
         });
         let completed = done_rx.recv_timeout(Duration::from_secs(1));
         release_tx.send(()).unwrap();
@@ -5760,7 +6677,7 @@ mod unlock_routing_tests {
         let (done_tx, done_rx) = mpsc::channel();
         let state = st.clone(); let paths = p.clone();
         let revoke = std::thread::spawn(move || {
-            done_tx.send(handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()] }, 0, None, Ok).is_ok()).unwrap();
+            done_tx.send(handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()], grantee: None }, 0, None, Ok).is_ok()).unwrap();
         });
         let completed = done_rx.recv_timeout(Duration::from_secs(1));
         release_tx.send(()).unwrap();
@@ -5795,7 +6712,7 @@ mod unlock_routing_tests {
         let (done_tx, done_rx) = mpsc::channel();
         let state = st.clone(); let paths = p.clone();
         let revoke = std::thread::spawn(move || {
-            done_tx.send(handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()] }, 0, None, Ok).is_ok()).unwrap();
+            done_tx.send(handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()], grantee: None }, 0, None, Ok).is_ok()).unwrap();
         });
         let completed = done_rx.recv_timeout(Duration::from_secs(1));
         release_tx.send(()).unwrap();
@@ -6194,6 +7111,34 @@ mod mutation_routing_tests {
             REQUEST_HOOK.with(|h| h.borrow_mut().take());
             clear(); std::fs::remove_dir_all(p.root).unwrap();
         }
+    }
+
+    #[test]
+    fn policy_tightening_ends_every_grantees_lease() {
+        let p = fixture("mutations-tighten-multi");
+        let v = peer_vault(&p, &agent::Peer::default()).unwrap();
+        let f = v.build_file("test/open", Tier::Open, true, false, &crate::crypto::new_dek(), b"synthetic", &v.pubkeys_local().unwrap(), None).unwrap();
+        store::save_secret(&p, &f).unwrap();
+        let st = Ctx::new(State::default());
+        for to in [Grantee::Any, Grantee::Kind("pi".into()), Grantee::Kind("claude".into())] {
+            let expires = now() + 3600;
+            let info = LeaseInfo { name: "test/open".into(), to_label: to.label(), to, granted: now(), expires, remaining: 3600, by: "synthetic".into() };
+            st.lock().unwrap().leases.put(Held { info, dek: crate::crypto::new_dek(), root: None, scope: Scope::default(), uses: 0 }).unwrap();
+        }
+        assert_eq!(st.lock().unwrap().leases.len(), 3);
+        helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|| Ok(()))));
+        helper::ECDH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|reqs| {
+            let sk = p256::SecretKey::from_slice(&[7;32]).unwrap();
+            reqs.iter().map(|(_,eph)| {
+                let pk = p256::PublicKey::from_sec1_bytes(&B64.decode(eph)?)?;
+                Ok(Zeroizing::new(p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine()).raw_secret_bytes().to_vec()))
+            }).collect()
+        })));
+        REQUEST_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|_,_| panic!("daemon must not self-RPC"))));
+        handle_as(&p, &st, agent::Peer::default(), Req::ChangePolicy { patterns: vec!["test/open".into()], tier: Some(Tier::Bio), agent_allowed: Some(false), public: None }, 0, None, Ok).unwrap();
+        assert!(st.lock().unwrap().leases.is_empty(), "tightening must end the access of every grantee");
+        REQUEST_HOOK.with(|h| h.borrow_mut().take());
+        clear(); std::fs::remove_dir_all(p.root).unwrap();
     }
 
     #[test]
@@ -7004,7 +7949,7 @@ mod capability_fence_tests {
             assert_eq!(B64.decode(response["values"][0]["value"].as_str().unwrap()).unwrap(), b"synthetic", "{action:?}");
         }
         clear_hooks();
-        for req in [Req::List, Req::Ping, Req::StatusSelftest, Req::SsoStatus, Req::Revoke { patterns: vec!["test/*".into()] },
+        for req in [Req::List, Req::Ping, Req::StatusSelftest, Req::SsoStatus, Req::Revoke { patterns: vec!["test/*".into()], grantee: None },
             Req::SsoForget { names: vec![] }, Req::AwsClose { id: "none".into() }] {
             if matches!(req, Req::StatusSelftest) { continue; } // would reach the real helper selftest
             assert_eq!(fence::request_verb(&req), None);
@@ -7020,7 +7965,7 @@ mod capability_fence_tests {
             Req::Ping, Req::StatusSelftest, Req::PubKeys, Req::List, Req::SsoStatus,
             Req::Use { names: vec![], cmd: None }, Req::Copy { name: "test/x".into() },
             Req::LaunchCancel { id: "x".into() }, Req::LaunchRedaction { id: "x".into() }, Req::LaunchBind { id: "x".into() },
-            Req::LaunchRedeem { token: "x".into() }, Req::Revoke { patterns: vec![] }, Req::SsoForget { names: vec![] },
+            Req::LaunchRedeem { token: "x".into() }, Req::Revoke { patterns: vec![], grantee: None }, Req::SsoForget { names: vec![] },
             Req::AwsOpen { profile: "x".into(), creds: "x".into(), ttl: 60 }, Req::AwsClose { id: "x".into() },
             Req::SsoOpen { name: "x".into(), dek: None, ttl: 60 },
             Req::Unlock { names: vec![], action: UnlockAction::Get, context: None, cmd: None, gate_open: true, sso_profile: None, ttl: 60 },
@@ -7087,7 +8032,7 @@ mod command_scope_race_tests {
         let paths = p.clone();
         USE_SCOPE_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move || {
             assert!(shared.try_lock().is_ok(), "snapshot phase must not hold State");
-            handle_as(&paths, &shared, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()] }, 0, None, Ok).unwrap();
+            handle_as(&paths, &shared, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()], grantee: None }, 0, None, Ok).unwrap();
         })));
         let response = use_lease(&p, &st, peer);
         assert!(response["deks"]["test/secret"].is_null());
@@ -9315,7 +10260,7 @@ int main(int argc,char **argv) {
                 assert_eq!(opens(&shim), 0);
                 match mode {
                     "cancel" | "cached-cancel" => { f.send(Req::LaunchCancel { id: prepared["id"].as_str().unwrap().into() }).unwrap(); }
-                    "revoke" => { f.send(Req::Revoke { patterns: vec!["*".into()] }).unwrap(); }
+                    "revoke" => { f.send(Req::Revoke { patterns: vec!["*".into()], grantee: None }).unwrap(); }
                     "revision" => { f.st.lock().unwrap().lease_revision += 1; }
                     "cached-expired" => { f.st.lock().unwrap().human.values_mut().next().unwrap().info.expires = now(); }
                     "policy" => f.policy(store::Tier::Open, true, false),
@@ -9443,7 +10388,7 @@ int main(int argc,char **argv) {
                 assert_eq!(f.st.lock().unwrap().human.len(), usize::from(cached));
                 match mode {
                     "cancel" => { f.send(Req::LaunchCancel { id: prepared["id"].as_str().unwrap().into() }).unwrap(); }
-                    "revoke" => { f.send(Req::Revoke { patterns: vec!["*".into()] }).unwrap(); }
+                    "revoke" => { f.send(Req::Revoke { patterns: vec!["*".into()], grantee: None }).unwrap(); }
                     "replacement" => f.policy(store::Tier::Bio, false, false),
                     "death" => { shim.child.kill().unwrap(); let _ = shim.child.wait(); }
                     "deadline" => {
@@ -9608,6 +10553,79 @@ int main(int argc,char **argv) {
     }
 
     #[test]
+    fn launch_redeem_spends_the_same_access_that_authorized_the_launch() {
+        let f = Fixture::redeem();
+        let me = f.peer.pid;
+        let start = agent::proc_start(me).unwrap();
+        // A second, more specific access with the same command scope. The test process
+        // is an ancestor of the shim, so a session grantee for it matches the shim.
+        let (cmds, dek) = {
+            let g = f.st.lock().unwrap();
+            let first = g.leases.only("test/ref").unwrap();
+            (first.scope.cmds.clone(), first.dek.clone())
+        };
+        let to = Grantee::Session(format!("pid:{me}@{start}"));
+        let info = LeaseInfo { name: "test/ref".into(), to_label: to.label(), to, granted: now(), expires: now() + 3600, remaining: 3600, by: "synthetic".into() };
+        f.st.lock().unwrap().leases.put(Held { info, dek, root: Some((me, start)), scope: Scope { cmds, ..Default::default() }, uses: 0 }).unwrap();
+        let prepared = redeem_prepare(&f);
+        let mut shim = redeem_shim(&f, &prepared, None);
+        shim.finish(b'r');
+        assert_eq!(opens(&shim), 1);
+        let g = f.st.lock().unwrap();
+        let spent: Vec<(String, u32)> = g.leases.all().map(|h| (h.info.to_label.clone(), h.uses)).collect();
+        // Session ranks above Any although Any ends first: only the session access pays.
+        assert_eq!(spent.iter().filter(|(_, uses)| *uses == 1).count(), 1, "{spent:?}");
+        assert!(spent.contains(&(format!("session pid:{me}@{start}"), 1)), "{spent:?}");
+        assert!(spent.contains(&("any".to_string(), 0)), "{spent:?}");
+    }
+
+    #[test]
+    fn kill_ends_every_grantees_access() {
+        let f = Fixture::redeem();
+        let me = f.peer.pid;
+        for kind in ["pi", "claude"] {
+            let to = Grantee::Kind(kind.into());
+            let info = LeaseInfo { name: "test/ref".into(), to_label: to.label(), to, granted: now(), expires: now() + 3600, remaining: 3600, by: "synthetic".into() };
+            f.st.lock().unwrap().leases.put(Held { info, dek: crate::crypto::new_dek(), root: None, scope: Scope::default(), uses: 0 }).unwrap();
+        }
+        assert_eq!(f.st.lock().unwrap().leases.len(), 3);
+        let human = agent::Peer { pid: me, caller: Default::default(), ..Default::default() };
+        crate::platform::helper::AUTH_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|| Ok(()))));
+        handle_as(&f.p, &f.st, human, Req::Kill { agent: Some("pi".into()), session: None, all: false, revive: false }, 0, None, Ok).unwrap();
+        assert!(f.st.lock().unwrap().leases.is_empty(), "blocking agents ends every access, not one");
+    }
+
+    #[test]
+    fn yolo_bound_launch_redeems_only_live_matching_folder_authority() {
+        for mode in ["on", "end", "expired", "other-agent"] {
+            let f = Fixture::redeem();
+            let file = store::load_secret(&f.p, "test/ref").unwrap();
+            let mut held = f.st.lock().unwrap().leases.remove("test/ref").unwrap();
+            held.scope = Scope::default();
+            held.info.to = Grantee::Any;
+            let mut info = held.info.clone(); info.name = "test/".into();
+            f.st.lock().unwrap().yolos.insert(("test".into(), Grantee::Any), Yolo {
+                info, root: None, keys: HashMap::from([("test/ref".into(), (file, held))]), added: Default::default(),
+            });
+            let prepared = redeem_prepare(&f);
+            let mut shim = redeem_shim(&f, &prepared, None);
+            match mode {
+                "end" => { f.send(Req::YoloEnd { path: "test".into(), grantee: Some(Grantee::Any) }).unwrap(); }
+                "expired" => { expire_leases(&f.p, &f.st, u64::MAX); }
+                "other-agent" => {
+                    let mut g = f.st.lock().unwrap();
+                    g.yolos.values_mut().next().unwrap().keys.values_mut().next().unwrap().1.info.to = Grantee::Kind("other".into());
+                }
+                _ => {}
+            }
+            shim.finish(if mode == "on" { b'a' } else { b'n' });
+            assert_eq!(opens(&shim), usize::from(mode == "on"), "{mode}");
+            assert!(f.st.lock().unwrap().leases.is_empty(), "YOLO never creates per-key accesses");
+            if mode == "on" { assert!(f.records().iter().any(|e| e["action"] == "yolo-used")); }
+        }
+    }
+
+    #[test]
     fn launch_redeem_wrong_token_burns_before_correct_retry() {
         let f = Fixture::redeem(); let prepared = redeem_prepare(&f);
         let mut shim = redeem_shim(&f, &prepared, None); shim.finish(b'w');
@@ -9622,7 +10640,7 @@ int main(int argc,char **argv) {
             let f = Fixture::redeem(); let prepared = redeem_prepare(&f);
             let mut shim = redeem_shim(&f, &prepared, None);
             match mode {
-                "revoke" => { f.send(Req::Revoke { patterns: vec!["*".into()] }).unwrap(); }
+                "revoke" => { f.send(Req::Revoke { patterns: vec!["*".into()], grantee: None }).unwrap(); }
                 "cancel" => { f.send(Req::LaunchCancel { id: prepared["id"].as_str().unwrap().into() }).unwrap(); }
                 "deadline" => { expire_launches(&f.p, &f.st, prepared["expires_at"].as_u64().unwrap()); }
                 _ => {
@@ -9857,7 +10875,7 @@ int main(int argc,char **argv) {
             entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             assert_eq!(opens(&shim), 0);
             if mode == "cancel" { f.send(Req::LaunchCancel { id: prepared["id"].as_str().unwrap().into() }).unwrap(); }
-            else { f.send(Req::Revoke { patterns: vec!["aws/*".into()] }).unwrap(); }
+            else { f.send(Req::Revoke { patterns: vec!["aws/*".into()], grantee: None }).unwrap(); }
             release_tx.send(()).unwrap();
             assert!(shim.child.wait().unwrap().success()); shim.handler.take().unwrap().join().unwrap();
             assert_eq!(*prompts.lock().unwrap(), vec!["sso"]);
@@ -9902,7 +10920,7 @@ int main(int argc,char **argv) {
             };
             match mode {
                 "cancel" => { f.send(Req::LaunchCancel { id: prepared["id"].as_str().unwrap().into() }).unwrap(); }
-                "revoke" => { f.send(Req::Revoke { patterns: vec!["aws/*".into()] }).unwrap(); }
+                "revoke" => { f.send(Req::Revoke { patterns: vec!["aws/*".into()], grantee: None }).unwrap(); }
                 "death" => { shim.child.kill().unwrap(); shim.child.wait().unwrap(); expire_launches(&f.p, &f.st, now()); }
                 "ttl" => { f.st.lock().unwrap().aws.get_mut(&id).unwrap().expires = Instant::now(); expire_leases(&f.p, &f.st, now()); }
                 "close" => { f.send(Req::AwsClose { id }).unwrap(); }
@@ -10232,7 +11250,7 @@ int main(int argc,char **argv) {
             assert!(!f.st.lock().unwrap().pending_launches.has_live_bound(expiry));
             match action {
                 "cancel" => { let v = f.send(Req::LaunchCancel { id: id.into() }).unwrap(); assert!(v.get("token").is_none()); }
-                "revoke" => { f.send(Req::Revoke { patterns: vec!["test/*".into()] }).unwrap(); }
+                "revoke" => { f.send(Req::Revoke { patterns: vec!["test/*".into()], grantee: None }).unwrap(); }
                 "deadline" => expire_launches(&f.p, &f.st, expiry),
                 "death" => { shim.child.kill().unwrap(); shim.child.wait().unwrap(); expire_launches(&f.p, &f.st, now()); }
                 "lease" => { let expiry = f.st.lock().unwrap().leases["test/ref"].info.expires; expire_leases(&f.p, &f.st, expiry); }
@@ -10384,7 +11402,7 @@ int main(int argc,char **argv) {
         let state = f.st.clone(); let paths = f.p.clone();
         LAUNCH_CAPTURE_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move || {
             assert!(state.try_lock().is_ok(), "LaunchBinding capture must not hold State");
-            handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()] }, 0, None, Ok).unwrap();
+            handle_as(&paths, &state, agent::Peer::default(), Req::Revoke { patterns: vec!["*".into()], grantee: None }, 0, None, Ok).unwrap();
         })));
         assert!(f.send(f.req()).is_err());
         assert!(!f.st.lock().unwrap().pending_launches.has_pending());
@@ -10405,7 +11423,7 @@ int main(int argc,char **argv) {
         for patterns in [vec!["*".into()], vec!["test/ref".into()]] {
             let f = Fixture::new(); let response = f.prepare();
             crate::audit::fail_phase(Some("all"));
-            f.send(Req::Revoke { patterns }).unwrap();
+            f.send(Req::Revoke { patterns, grantee: None }).unwrap();
             let owner = agent::process_identity(f.peer.pid).unwrap();
             assert!(f.st.lock().unwrap().pending_launches.take_and_burn(response["id"].as_str().unwrap(), owner, now()).is_err());
         }

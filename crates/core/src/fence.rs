@@ -188,12 +188,13 @@ pub(crate) fn request_verb(req: &Req) -> Option<Verb> {
         Req::SsoLogout { .. } => Some(Verb::SsoLogout),
         Req::RunUnredacted { .. } => Some(Verb::NoRedact),
         Req::Shutdown => Some(Verb::DaemonStop),
-        Req::Grant { .. } | Req::GrantLease { .. } => Some(Verb::LeaseGrant),
+        Req::Grant { .. } | Req::GrantLease { .. } | Req::YoloStart { .. } => Some(Verb::LeaseGrant),
         Req::HumanUnlock { .. } => Some(Verb::HumanUnlock),
         Req::Call { .. } | Req::Ping | Req::StatusSelftest | Req::PubKeys | Req::ChangePolicy { .. } | Req::ChangeConfig { .. }
         | Req::Unlock { .. } | Req::Copy { .. } | Req::Use { .. } | Req::LaunchPrepare { .. }
         | Req::LaunchCancel { .. } | Req::LaunchRedaction { .. } | Req::LaunchBind { .. }
         | Req::LaunchRedeem { .. } | Req::Revoke { .. } | Req::List | Req::AwsOpen { .. }
+        | Req::EndTemporaryAccess { .. } | Req::YoloEnd { .. } | Req::YoloList | Req::YoloEnroll { .. } | Req::YoloForget { .. }
         | Req::AwsClose { .. } | Req::SsoForget { .. } | Req::SsoStatus | Req::SsoOpen { .. } => None,
     }
 }

@@ -300,6 +300,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: LeaseCmd,
     },
+    /// Start, end or list RAM-only folder YOLO access.
+    Yolo {
+        #[command(subcommand)]
+        cmd: YoloCmd,
+    },
     /// Recover secrets using your offline backup identity.
     #[command(long_about = "Recovery: move dead SE keys aside, create new ones, rewrap all secrets from the offline backup identity. Omit FILE to type the paper key. Refuses, changing nothing, unless the key opens every secret; --accept-loss NAME[,NAME] gives up exactly the secrets it lists as unrecoverable. An interrupted recovery is finished by running it again.")]
     Recover {
@@ -478,6 +483,24 @@ enum DaemonCmd {
 }
 
 #[derive(Subcommand)]
+enum YoloCmd {
+    /// Let an agent use all non-public keys below FOLDER, including keys added later.
+    Start {
+        folder: String,
+        #[arg(long)]
+        to: String,
+        /// Duration in hours, at most 168 (7 days). Requires one Touch ID.
+        #[arg(long)]
+        hours: f64,
+    },
+    /// End all YOLO access on FOLDER, or only the selected grantee's.
+    End { folder: String, #[arg(long)] to: Option<String> },
+    /// List active YOLO access. Use --json for machine-readable output.
+    #[command(name = "ls", alias = "list")]
+    List,
+}
+
+#[derive(Subcommand)]
 enum LeaseCmd {
     /// Grant temporary access with Touch ID (human-only, globs ok).
     #[command(long_about = "Let agents use Agents · Touch ID secrets without a prompt for a while (human-only, one Touch ID).\n\nExample:\n  karambit lease grant stripe/live-key --to claude --hours 2 --cwd ~/code/myapp")]
@@ -512,6 +535,9 @@ enum LeaseCmd {
     Revoke {
         /// Secret names or globs.
         patterns: Vec<String>,
+        /// End only this agent's lease (pi, claude, any, session:ID). Default: all.
+        #[arg(long)]
+        to: Option<String>,
     },
 }
 
@@ -576,7 +602,7 @@ fn print_secret_table(items: &[karambit_core::SecretMeta]) {
     for s in items {
         let level = explain::level_label(explain::level(s.tier, s.agent_allowed, s.public));
         let mut note = Vec::new();
-        if let Some(l) = &s.lease { note.push(format!("temporary access: {} · {} left", l.info.to_label, dur(l.info.remaining))); }
+        for l in &s.leases { note.push(format!("temporary access: {} · {} left", l.info.to_label, dur(l.info.remaining))); }
         if !s.has_backup { note.push("no backup".into()); }
         println!("{level:<20}  {:<width$}  {}", s.name, note.join("; "));
     }
@@ -788,10 +814,9 @@ fn brief_text(items: &[karambit_core::SecretMeta]) -> String {
     if items.is_empty() { eprintln!("no secrets match"); }
     items.iter().map(|m| {
         let access = explain::level(m.tier, m.agent_allowed, m.public);
-        match &m.lease {
-            Some(l) => format!("{}\t{access}\tlease {} {}\n", m.name, l.info.to_label, dur(l.info.remaining).replace(' ', "")),
-            None => format!("{}\t{access}\n", m.name),
-        }
+        // One `lease <who> <left>` field per grantee.
+        let leases: String = m.leases.iter().map(|l| format!("\tlease {} {}", l.info.to_label, dur(l.info.remaining).replace(' ', ""))).collect();
+        format!("{}\t{access}{leases}\n", m.name)
     }).collect()
 }
 
@@ -800,6 +825,9 @@ fn brief_json(items: &[karambit_core::SecretMeta]) -> serde_json::Value {
     json!(items.iter().map(|m| {
         let mut j = json!({"name": m.name, "access": explain::level(m.tier, m.agent_allowed, m.public)});
         if let Some(l) = &m.lease { j["lease"] = json!({"to": l.info.to_label, "left_s": l.info.remaining}); }
+        if !m.leases.is_empty() {
+            j["leases"] = json!(m.leases.iter().map(|l| json!({"to": l.info.to_label, "left_s": l.info.remaining})).collect::<Vec<_>>());
+        }
         j
     }).collect::<Vec<_>>())
 }
@@ -1188,7 +1216,8 @@ fn command_verb(cmd: &Cmd) -> Option<Verb> {
         Cmd::Run { .. } => None,
         Cmd::Rm { .. } => Some(Verb::Rm),
         Cmd::Mv { .. } => Some(Verb::Rename),
-        Cmd::Lease { cmd: LeaseCmd::Grant { .. } } => Some(Verb::LeaseGrant),
+        Cmd::Lease { cmd: LeaseCmd::Grant { .. } } | Cmd::Yolo { cmd: YoloCmd::Start { .. } } => Some(Verb::LeaseGrant),
+        Cmd::Yolo { cmd: YoloCmd::End { .. } | YoloCmd::List } => None,
         Cmd::Lease { cmd: LeaseCmd::List | LeaseCmd::Revoke { .. } } => None,
         Cmd::Recover { .. } => Some(Verb::Recover),
         Cmd::Helper { cmd: HelperCmd::Pin { .. } } => Some(Verb::HelperPin),
@@ -1277,8 +1306,12 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
             if cli.json { print_json(&r) } else { println!("initialized {}", v.paths.root.display()) }
         }
         Cmd::Status => {
-            let st = v.status()?;
-            if cli.json { print_json(&st) } else { print_status(&st) }
+            let mut st = v.status()?;
+            st["yolos"] = json!(v.yolos()?);
+            if cli.json { print_json(&st) } else {
+                print_status(&st);
+                for y in v.yolos()? { println!("YOLO: {}/ · {} · {} left", y.path, y.to_label, dur(y.remaining)); }
+            }
         }
         Cmd::Add { name, access, touch, human_only, public, force } => {
             let (touch, agent_allowed, public) = match access {
@@ -1407,6 +1440,23 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
                 }
             }
         }
+        Cmd::Yolo { cmd: YoloCmd::Start { folder, to, hours } } => {
+            let to = karambit_core::lease::Grantee::parse(&to)?;
+            let got = v.yolo_start(&folder, &to, hours)?;
+            if cli.json { print_json(&json!(got)); }
+            else { println!("YOLO is on for {folder}/ to {}", to.label()); }
+        }
+        Cmd::Yolo { cmd: YoloCmd::End { folder, to } } => {
+            let to = to.as_deref().map(karambit_core::lease::Grantee::parse).transpose()?;
+            v.yolo_end(&folder, to.as_ref())?;
+            println!("YOLO ended for {folder}/");
+        }
+        Cmd::Yolo { cmd: YoloCmd::List } => {
+            let ys = v.yolos()?;
+            if cli.json { print_json(&json!(ys)); }
+            else if ys.is_empty() { println!("no active YOLO access"); }
+            else { for y in ys { println!("{}/  YOLO  {}  {} left", y.path, y.to_label, dur(y.remaining)); } }
+        }
         Cmd::Lease { cmd: LeaseCmd::Grant { patterns, hours, to, cwd, cmd, script, max_uses } } => {
             let g = karambit_core::lease::Grantee::parse(&to)?;
             let cmds = karambit_core::lease::command_bindings(&cmd, &script, &std::env::current_dir()?)?;
@@ -1426,13 +1476,15 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
             } else {
                 for l in ls {
                     let sc = if l.scope.is_empty() { String::new() } else { format!("  [{}]", l.scope.label()) };
-                    println!("{:<32} {:<20} {} left, used {}x{sc}", l.info.name, l.info.to_label, dur(l.info.remaining), l.uses);
+                    if l.yolo { println!("{:<32} YOLO  {:<20} {} left", l.info.name, l.info.to_label, dur(l.info.remaining)); }
+                    else { println!("{:<32} {:<20} {} left, used {}x{sc}", l.info.name, l.info.to_label, dur(l.info.remaining), l.uses); }
                 }
             }
         }
-        Cmd::Lease { cmd: LeaseCmd::Revoke { patterns } } => {
-            for n in v.revoke_lease(&patterns)? {
-                println!("revoked lease on {n}");
+        Cmd::Lease { cmd: LeaseCmd::Revoke { patterns, to } } => {
+            let to = to.as_deref().map(karambit_core::lease::Grantee::parse).transpose()?;
+            for n in v.revoke_lease_for(&patterns, to.as_ref())? {
+                match &to { Some(t) => println!("revoked lease on {n} for {}", t.label()), None => println!("revoked lease on {n}") }
             }
         }
         Cmd::Recover { identity_file, accept_loss } => {
@@ -2041,6 +2093,20 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     #[test]
+    fn yolo_cli_requires_explicit_grantee_and_duration() {
+        for args in [vec!["yolo", "start", "stripe"], vec!["yolo", "start", "stripe", "--to", "pi"], vec!["yolo", "start", "stripe", "--hours", "6"]] {
+            assert!(Cli::try_parse_from([vec!["karambit"], args].concat()).is_err());
+        }
+        let parsed = Cli::try_parse_from(["karambit", "yolo", "start", "stripe", "--to", "pi", "--hours", "6"]).unwrap();
+        assert!(matches!(parsed.cmd, Cmd::Yolo { cmd: YoloCmd::Start { hours: 6.0, .. } }));
+        assert!(Cli::try_parse_from(["karambit", "yolo", "ls", "--json"]).unwrap().json);
+        for args in [vec!["yolo", "ls"], vec!["yolo", "end", "stripe"], vec!["yolo", "end", "stripe", "--to", "pi"]] {
+            let parsed = Cli::try_parse_from([vec!["karambit"], args].concat()).unwrap();
+            assert!(command_verb(&parsed.cmd).is_none());
+        }
+    }
+
+    #[test]
     fn lease_grant_script_flag_and_script_path_suggestion() {
         let grant = |args: &[&str]| match Cli::try_parse_from([&["karambit", "lease", "grant", "a/b"], args].concat()).map(|c| c.cmd) {
             Ok(Cmd::Lease { cmd: LeaseCmd::Grant { cmd, script, .. } }) => (cmd, script),
@@ -2140,6 +2206,7 @@ mod tests {
             (Verb::Get, vec!["get", "test/bio"]),
             (Verb::Get, vec!["get", "test/bio", "--stdout"]),
             (Verb::LeaseGrant, vec!["lease", "grant", "test/bio"]),
+            (Verb::LeaseGrant, vec!["yolo", "start", "test", "--to", "pi", "--hours", "6"]),
             (Verb::KeysUpgrade, vec!["keys", "upgrade"]),
             (Verb::HelperPin, vec!["helper", "pin"]),
             (Verb::Recover, vec!["recover"]),

@@ -379,11 +379,16 @@ dialog {
   border: 0; border-radius: 12px; padding: var(--s5); width: 460px; max-height: 88vh; overflow: auto;
   color: var(--fg); background: var(--surface); box-shadow: var(--shadow-pop);
 }
-dialog[open] { animation: pop var(--t) var(--ease); }
-@keyframes pop { from { transform: translateY(6px); } }
+/* Motion: dialogs fade and rise on open and sink on close. Closing keeps the dialog on screen until the
+   transition ends (display and overlay are discrete). Browsers without this just open and close at once. */
+dialog { opacity: 0; transform: translateY(6px); transition: opacity var(--t) var(--ease), transform var(--t) var(--ease), overlay var(--t) allow-discrete, display var(--t) allow-discrete; }
+dialog[open] { opacity: 1; transform: none; }
+@starting-style { dialog[open] { opacity: 0; transform: translateY(6px); } }
 dialog.small { width: 380px; }
 dialog.wide { width: 640px; }
-dialog::backdrop { background: var(--scrim); }
+dialog::backdrop { background: var(--scrim); opacity: 0; transition: opacity var(--t) var(--ease), overlay var(--t) allow-discrete, display var(--t) allow-discrete; }
+dialog[open]::backdrop { opacity: 1; }
+@starting-style { dialog[open]::backdrop { opacity: 0; } }
 dialog h2 { margin-bottom: var(--s1); }
 dialog .lbl:first-of-type { margin-top: var(--s4); }
 .opts { margin-top: var(--s4); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
@@ -772,7 +777,9 @@ fieldset.seg input:checked + span { background: var(--accent); color: var(--on-a
 .lease-sentence strong { font-size: 16px; overflow-wrap: anywhere; white-space: normal; }
 .lease-sentence input:not([type=checkbox]) { flex: 1 1 180px; width: auto; min-width: 180px; max-width: 100%; font-size: 14px; }
 .lease-help { margin-top: 16px; line-height: 1.6; }
-#lease-active-sub { margin: 8px 0; }
+#lease-active { margin-top: var(--s5); }
+#lease-active .sh2 .sec { margin: 0; }
+#lease-active .sh-end { margin: 0 2px 0 auto; }
 
 /* Fixed shell; each column owns its scroll, not the document. */
 body { height: 100vh; }
@@ -1240,3 +1247,54 @@ mark.hit { background: var(--accent-soft); color: var(--accent-text); border-rad
 .aws-tree-body .secret-row + .secret-row { border-top: 1px solid var(--line); }
 .aws-tree > summary::before { content: ''; width: 7px; height: 7px; margin: 0 4px 0 2px; border-right: 2px solid var(--fg-2); border-bottom: 2px solid var(--fg-2); transform: rotate(-45deg); }
 .aws-tree[open] > summary::before { transform: rotate(45deg); }
+
+/* ---------- folder YOLO ---------- */
+.tag.yolo { color: var(--bad); background: var(--bad-soft); }
+.tag-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.row-added { color: var(--fg-2); font-size: 12px; }
+.yolo-banner { display: flex; flex-direction: column; gap: 12px; }
+.yolo-banner-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; width: 100%; }
+.yolo-banner.has-icon { padding-left: 14px; }
+.yolo-banner .banner-icon { position: static; flex: none; align-self: flex-start; margin-top: 2px; }
+.yolo-banner .yb-text { flex: 1 1 240px; min-width: 0; }
+.yolo-banner .yb-text small { display: block; font-weight: 400; opacity: .9; }
+.yolo-table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+.yolo-table th { text-align: left; font-weight: 500; color: var(--fg-2); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.yolo-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.yolo-table td.mono { font-family: var(--font-mono); }
+.yolo-table td.warn-cell { color: var(--bad); }
+.yolo-table td.dim { color: var(--fg-2); }
+@media (max-width: 900px) { .yolo-table th:nth-child(2), .yolo-table td:nth-child(2) { display: none; } }
+
+/* ---------- panel open: keep every label (layout fix, design) ----------
+   With a key's side panel open the list was squeezed to about 400 px. The app cut each level badge down to its
+   icon (font-size: 0), clipped the title ("strip…") and cut off the filter chips. Now every label stays at full size.
+   Above 900 px the list wraps: the badge sits under the name and the filter chips wrap.
+   At 900 px and below the panel slides over the list instead of squeezing it, so the list keeps its closed layout.
+   Scoped to #view-secrets; the AWS page keeps its own compact rows. */
+@media (min-width: 901px) {
+  #view-secrets .secrets-body:has(.inspector:not([hidden])) .secret-row { flex-wrap: wrap; gap: 2px 10px; padding: 10px 12px; min-height: 0; }
+  #view-secrets .secrets-body:has(.inspector:not([hidden])) .secret-row .row-name { flex: 1 1 calc(100% - 44px); }
+  #view-secrets .secrets-body:has(.inspector:not([hidden])) .secret-row .level-badge { flex: none; margin-left: 44px; font-size: 12px; padding: 5px 9px; gap: 6px; }
+  #view-secrets:has(.inspector:not([hidden])) .head-row { flex-wrap: wrap; }
+  #view-secrets:has(.inspector:not([hidden])) .head-row #folder-title { flex: none; max-width: 100%; }
+  #view-secrets:has(.inspector:not([hidden])) .filter-row { flex-wrap: wrap; }
+  #view-secrets:has(.inspector:not([hidden])) .filter-row .search { flex: 1 1 100%; }
+  #view-secrets:has(.inspector:not([hidden])) .filter-row .exposure { flex: 1 1 100%; margin: 0; }
+  #view-secrets:has(.inspector:not([hidden])) .filter-row .exposure-chips { flex-wrap: wrap; overflow: visible; -webkit-mask-image: none; mask-image: none; padding-right: 0; }
+}
+@media (max-width: 900px) {
+  #view-secrets:has(.inspector:not([hidden])) { padding-right: 18px; }
+  #view-secrets .secrets-body:has(.inspector:not([hidden])) .secret-row { flex-wrap: nowrap; gap: 14px; padding: 10px 16px; min-height: 66px; }
+  #view-secrets .secrets-body:has(.inspector:not([hidden])) .secret-row .level-badge { margin-left: 0; font-size: 12px; padding: 5px 9px; gap: 6px; }
+  #view-secrets .inspector { box-shadow: var(--shadow-pop); z-index: 6; }
+}
+
+/* ---------- motion (design) ----------
+   Every duration is var(--t) or var(--t-fast), which the reduced-motion rule at the top sets to 0ms. */
+@keyframes view-in { from { opacity: 0; transform: translateY(4px); } }
+@keyframes slide-in { from { opacity: 0; transform: translateX(14px); } }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
+main > section:not([hidden]), .motion-in, .banner:not([hidden]), .lrow.row-in { animation: view-in var(--t) var(--ease); }
+.inspector.slide-in { animation: slide-in var(--t) var(--ease); }
+.folder-menu[open] .menu-actions, .more-menu[open] .more-popover { animation: menu-in var(--t-fast) var(--ease); transform-origin: top right; }

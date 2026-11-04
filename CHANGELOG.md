@@ -7,9 +7,39 @@ All notable changes to Karambit are listed here. The format follows
 
 ### Added
 
+- Folder YOLO: one Touch ID grants up to 7 days of temporary access to a folder's non-public keys,
+  including Only me keys and keys added, moved in or given a new value through Karambit.
+  Keys keep their access level and encryption at rest. Public keys and output redaction stay unchanged.
+- `karambit yolo start FOLDER --to GRANTEE --hours N`, `yolo end FOLDER [--to GRANTEE]` and `yolo ls [--json]`.
+  YOLO has one RAM-only record per folder and grantee, separate from a key's 8 temporary accesses.
+  It ends on expiry, End, agent blocking or daemon restart, and continues through screen lock.
+- App YOLO dialog, folder and key tags, per-agent banners and Status rows with separate End buttons.
+  The dialog defaults to 6 hours. A dedicated helper approval names Only me keys and keys added later;
+  the upgrade requires the normal helper and daemon re-pin.
 - `karambit mv OLD NEW` renames a secret, and `karambit mv OLD/ NEW/` moves a folder. Value, access
   level and backup copy are kept; it is human-only, asks for Touch ID and ends temporary access.
-- App: an Edit button for secrets (name, value and access) and "Rename or move…" in the folder menu.
+- A secret can hold up to 8 leases, one for each agent or session. A new grant replaces only that
+  agent's lease. A use is served by one lease and scopes are never combined. `karambit lease revoke NAME --to AGENT`
+  ends one; without `--to` it ends all. The app lists each temporary access with its own End button.
+- App: an Edit button for secrets (name, value and access) and "Rename or move" in the folder menu.
+
+### Fixed
+
+- Secrets keep full-size access labels, folder titles and wrapping filters when the side panel opens.
+  At 900 px and below, the panel overlays the list instead of squeezing it.
+- App End all temporary access now ends per-key access and YOLO records together in the daemon.
+  Its warning includes ancestor YOLOs even when the selected key is not covered. Exact key names
+  no longer select same-named folders. Background refresh keeps access dialog drafts unchanged.
+  Failed YOLO queries report an error or unknown state instead of hiding active access.
+- Key inspectors and secret details show covering YOLO records with scoped End buttons and active
+  override explanations, while keeping the stored access level visible.
+
+### Changed
+
+- App dialogs, navigation, panels, menus and new temporary access rows use subtle entrance motion.
+  Background refresh does not replay list, panel or existing access-row entrances. Reduce Motion disables motion.
+- Granting a lease to one agent no longer replaces another agent's lease on the same secret.
+  `karambit ls --json` and `brief` list every lease (`leases`); `lease` stays as the one that ends first.
 
 ## [0.1.0] - 2026-10-29
 

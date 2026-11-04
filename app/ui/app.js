@@ -8,6 +8,8 @@ const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const $ = (id) => document.getElementById(id);
 
 let secrets = [];
+let yoloError = "";
+let yolos = {}; // folder path -> one active record per grantee, with verified covered names
 let cfg = null;
 
 // ---------- helpers ----------
@@ -85,6 +87,7 @@ function toastError(title, msg) {
 const CMD_FAIL_TITLE = {
   add: "Couldn't save the secret", remove: "Couldn't delete", set_policy: "Couldn't change access", block_agents: "Couldn't change agent blocking", recover: "Couldn't restore", policy_explain: "Couldn't check the rules",
   set_config: "Couldn't save a setting", copy_secret: "Couldn't copy", keys_upgrade: "Couldn't add the agent key",
+  yolo_start: "Couldn't start YOLO", yolo_end: "Couldn't end YOLO",
   lease_grant: "Couldn't give temporary access", lease_revoke: "Couldn't end temporary access", lease_revoke_all: "Couldn't end temporary access",
   aws_add: "Couldn't save the AWS profile", aws_add_sso: "Couldn't save the AWS profile", aws_show: "Couldn't read the AWS profile",
   sso_portal_add: "Couldn't add the AWS portal", sso_portal_remove: "Couldn't remove the AWS portal", sso_logout: "Couldn't sign out",
@@ -161,6 +164,14 @@ function confirmDialog(title, msg, okLabel = "Delete", danger = true, noLabel = 
 
 let currentView = "secrets";
 
+// Replay an entrance animation on a node that stays in the DOM (it is re-filled, not re-created).
+function playIn(node, cls = "motion-in") {
+  node.classList.remove(cls);
+  void node.offsetWidth;
+  node.classList.add(cls);
+  node.addEventListener("animationend", () => node.classList.remove(cls), { once: true });
+}
+
 function show(view) {
   if (view === "sources" && !sourceKinds.length) view = "secrets";
   currentView = view;
@@ -221,6 +232,7 @@ async function loadSecrets() {
   const [list, sourceResult] = await Promise.all([call("list"), sourceKinds.length ? call("source_list") : { sources: [] }, refreshSso()]);
   sources = sourceResult.sources || [];
   secrets = list;
+  await loadYolos();
   renderLists();
   renderInspector();
   if (awsDetailTarget) renderAwsDetail(secrets.find((s) => s.name === awsDetailTarget.name) || null);
@@ -486,7 +498,8 @@ function deleteButton(s) {
         ? `${display} will be removed from Karambit. ${awsMeta.get(s.name)?.sso ? "Your AWS access itself is unchanged." : "The keys themselves stay valid in AWS until they expire."}`
         : `${s.name} will be permanently removed.`,
       "This can't be undone: its offline backup copy is stored with it, so karambit recover can't bring it back.",
-      s.lease ? `${s.lease.to_label} has temporary access until ${fullTime(s.lease.expires)}; that ends now.` : null,
+      leasesOf(s).length === 1 ? `${leasesOf(s)[0].to_label} has temporary access (${endsAt(leasesOf(s)[0].expires)}); that ends now.`
+        : leasesOf(s).length > 1 ? `${leasesOf(s).length} agents have temporary access to it; that ends now.` : null,
     ];
     if (!(await confirmDialog(aws ? "Delete AWS profile?" : "Delete secret?", lines, aws ? "Delete profile" : "Delete secret"))) return;
     try {
@@ -498,9 +511,120 @@ function deleteButton(s) {
   return del;
 }
 
+// Temporary accesses on a secret: one per agent, the soonest to end first. The daemon
+// sends them as `leases`; each has `to` as {type: "any"|"kind"|"session"|"human", value}.
+const leasesOf = (s) => s.leases || [];
+
+// Option value the Give-access select uses for the same agent.
+const granteeValue = (to) => (to.type === "any" ? "any" : to.type === "session" ? `session:${to.value}` : to.value);
+
+// Short name for a row: "pi", "Any agent", "Session 4821".
+function granteeName(to) {
+  if (to.type === "any") return "Any agent";
+  if (to.type === "human") return "You";
+  if (to.type === "session") return `Session ${String(to.value).replace(/^pid:/, "").split("@")[0]}`;
+  return to.value;
+}
+
 function leaseTag(s) {
-  return s.lease ? el("span", { class: "tag lease", textContent: `Temporary access · ${durShort(s.lease.remaining)}`,
-    title: `Given to ${s.lease.to_label} until ${fullTime(s.lease.expires)}` }) : null;
+  const all = leasesOf(s);
+  if (!all.length) return null;
+  if (all.length === 1) {
+    return el("span", { class: "tag lease", textContent: `Temporary access · ${durShort(all[0].remaining)}`,
+      title: `Given to ${all[0].to_label} · ${endsAt(all[0].expires)}` });
+  }
+  return el("span", { class: "tag lease", textContent: `Temporary access · ${all.length} agents`,
+    title: all.map((l) => `${granteeName(l.to)} · ${endsAt(l.expires)}`).join("\n") });
+}
+
+// YOLO: a folder-wide, named, red temporary access that also covers keys added later.
+const folderYolos = (path) => (yolos[path] || []).filter((y) => y.expires > Date.now() / 1000);
+const yolosFor = (s) => s.public || yoloError ? [] : Object.keys(yolos).flatMap(folderYolos)
+  .filter((y) => y.covered?.includes(s.name)).sort((a, b) => a.expires - b.expires);
+const yoloOf = (name) => yolosFor({ name })[0] || null;
+async function loadYolos() {
+  try { yolos = await invoke("yolo_list"); yoloError = ""; }
+  catch (err) { yolos = {}; yoloError = `YOLO status unknown: ${String(err)}`; }
+}
+function yoloOverride(s) {
+  if (s.public) return "";
+  if (yoloError) return yoloError;
+  return yolosFor(s).map((y) => `YOLO on ${y.path}/ · ${granteeName(y.to)}: no prompt · ${endsAt(y.expires)}`).join("; ");
+}
+// Revocation ends whole ancestor records even when the selected keys are not covered.
+function endAllYolosFor(patterns) {
+  return Object.keys(yolos).flatMap(folderYolos).filter((y) => patterns.some((pt) =>
+    pt === "*" || pt.startsWith(`${y.path}/`) || (pt.endsWith("/") && `${y.path}/`.startsWith(pt))));
+}
+function endAllYoloNote(records) {
+  if (yoloError) return "Folder YOLO scope is unknown. End all also ends any matching folder YOLO for every key in those folders.";
+  const paths = [...new Set(records.map((y) => y.path))].sort();
+  return paths.length ? `End all also ends YOLO on ${paths.map((p) => `${p}/`).join(", ")} for every key in ${paths.length === 1 ? "that folder" : "those folders"}.` : "";
+}
+function yoloAccessRow(y) {
+  const who = granteeName(y.to);
+  const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End", "aria-label": `End YOLO for ${who} to ${y.path}/`, onclick: () => endYolo(y.path, end, y.to) });
+  return el("div", { class: "lrow" }, el("span", { class: "t2" },
+    el("span", {}, el("span", { class: "tag yolo", textContent: "YOLO" }), " ", el("span", { class: "mono", textContent: `${y.path}/ · ${who}` })),
+    el("small", { textContent: `No prompt · ${endsAt(y.expires)}` })), end);
+}
+function yoloAccessRows(s) {
+  return yoloError && !s.public ? [el("p", { class: "form-error", role: "alert", textContent: yoloError })] : yolosFor(s).map(yoloAccessRow);
+}
+const soonestYolo = (path) => folderYolos(path).sort((a, b) => a.expires - b.expires)[0] || null;
+function yoloTag(s) {
+  const y = s.public ? null : yoloOf(s.name);
+  return y ? el("span", { class: "tag yolo", textContent: "YOLO · no prompt", title: `${y.to_label} can use this without Touch ID · ${endsAt(y.expires)}` }) : null;
+}
+function yoloAdded(s) {
+  const added = !s.public && Object.keys(yolos).flatMap(folderYolos)
+    .some((y) => y.covered?.includes(s.name) && y.added?.includes(s.name));
+  return added ? el("span", { class: "row-added", textContent: "Added while YOLO is on" }) : null;
+}
+function tagLine(s) {
+  const tags = [leaseTag(s), yoloTag(s), yoloAdded(s)].filter(Boolean);
+  return tags.length ? el("span", { class: "tag-line" }, ...tags) : null;
+}
+function renderYoloBanner() {
+  const b = $("yolo-banner");
+  const active = Object.keys(yolos).filter((p) => currentFolder === p || currentFolder.startsWith(p + "/"))
+    .flatMap((path) => folderYolos(path).map((y) => ({ path, y })));
+  b.hidden = !active.length && !yoloError;
+  if (yoloError) { b.replaceChildren(el("span", { role: "alert", textContent: yoloError })); return; }
+  b.replaceChildren(...active.map(({ path, y }) => {
+    const who = granteeName(y.to);
+    const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End YOLO", "aria-label": `End YOLO for ${who} to ${path}/`, onclick: () => endYolo(path, end, y.to) });
+    const glyph = icon(["M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 1 0 0-13z", "M8 7.3v4", "M8 4.9v.01"]);
+    glyph.setAttribute("class", "banner-icon");
+    return el("div", { class: "yolo-banner-row" }, glyph,
+      el("span", { class: "yb-text" }, el("b", { textContent: `YOLO is on for ${path}/ · ${who} · ${durShort(y.expires - Date.now() / 1000)} left (${endsAt(y.expires)})` }),
+        el("small", { textContent: "Agents use covered keys here without Touch ID, Only me keys included, and so do keys you add. The keys keep their level at rest." })), end);
+  }));
+}
+async function endYolo(path, ctl, to = null) {
+  try { await call("yolo_end", { path, to }, ctl); toast(`YOLO ended for ${path}/`); } catch { return; }
+  await loadSecrets(); if ($("detail-dialog").open) renderDetail(); if (currentView === "status") loadStatusPage();
+}
+function openYolo(path, items) {
+  const live = items.filter((s) => !s.public), only = live.filter((s) => accessOf(s) === "me-touch" || accessOf(s) === "me");
+  $("yolo-title").textContent = `YOLO for agents · ${path}/`;
+  $("yolo-path").textContent = `${path}/`;
+  $("yolo-sub").textContent = `Folder · ${plural(items.length, "item")} · ${live.length} ${live.length === 1 ? "is" : "are"} covered${items.length > live.length ? ` (${items.length - live.length} public stays as it is)` : ""}`;
+  $("yolo-warn-text").replaceChildren("Agents can use every key in ", el("b", { textContent: `${path}/` }), " without Touch ID", ...(only.length ? [", including ", el("b", { textContent: plural(only.length, "Only me key") })] : []), " until this ends. Keys you add here while it is on are covered too. The keys keep their level at rest.");
+  $("yolo-to").replaceChildren(el("option", { value: "any", textContent: "Any agent" }), ...["claude", "pi", "codex", "kiro", "cursor"].map((k) => el("option", { value: k, textContent: `Any ${k} agent` })));
+  $("yolo-to").value = "claude";
+  $("yolo-hours").value = "6";
+  $("yolo-table").tBodies[0].replaceChildren(...items.map((s) => {
+    const id = accessOf(s);
+    const [text, cls] = s.public ? ["unchanged", "dim"] : id === "agents" ? ["already no prompt", "dim"] : id === "agents-touch" ? ["no prompt", ""] : ["no prompt (normally refused)", "warn-cell"];
+    return el("tr", {}, el("td", { class: "mono", textContent: s.name.slice(path.length + 1) }), el("td", { textContent: accessLevel(id).label }), el("td", { class: cls, textContent: text }));
+  }));
+  $("yolo-start").onclick = async () => {
+    try { await call("yolo_start", { path, to: $("yolo-to").value, hours: Number($("yolo-hours").value) }, $("yolo-start")); toast(`YOLO is on for ${path}/`); } catch { return; }
+    $("yolo-dialog").close(); await loadSecrets();
+  };
+  $("yolo-cancel").onclick = () => $("yolo-dialog").close();
+  openDialog($("yolo-dialog"));
 }
 
 function levelBadge(s, editable = false) {
@@ -516,7 +640,7 @@ function secretRow(s, label) {
     el("span", { class: "tile" }, levelGlyph(accessOf(s))),
     el("div", { class: "row-name" },
       el("div", { class: "row-name-line" }, el("button", { type: "button", class: "leaf link", textContent: label, "aria-label": `Details for ${s.name}`, onclick: () => openDetail(s.name) }), isAws(s.name) ? null : valueButton(s)),
-      el("span", { class: "muted small", textContent: isAws(s.name) ? (meta ? awsSummary(meta) : "AWS profile · open details") : s.public ? "Public · never redacted" : "" }), leaseTag(s)),
+      el("span", { class: "muted small", textContent: isAws(s.name) ? (meta ? awsSummary(meta) : "AWS profile · open details") : s.public ? "Public · never redacted" : "" }), tagLine(s)),
     levelBadge(s, true),
     el("span", { class: "when", textContent: relTime(s.updated), title: fullTime(s.updated) }));
   return wholeRow(row, () => openDetail(s.name));
@@ -532,6 +656,7 @@ function wholeRow(row, open) {
 
 function renderLists() {
   renderSecrets();
+  renderYoloBanner();
   renderAwsPage();
   if (currentView === "sources") renderSources();
 }
@@ -549,6 +674,8 @@ function navigateFolder(path = "", source = null) {
   currentFolder = path;
   selectedSecret = null;
   renderSecrets();
+  playIn($("rows"));
+  renderYoloBanner();
   renderInspector();
   $("folder-title").focus();
   document.querySelectorAll(".folder-menu[open]").forEach((n) => { n.open = false; });
@@ -570,9 +697,12 @@ function folderRow(path, items, matches) {
       el("div", { class: "menu-heading" }, el("b", { textContent: path + "/" }), el("button", { type: "button", class: "ibtn", "aria-label": "Close folder menu", onclick: () => { menu.open = false; menu.querySelector("summary").focus(); } }, icon(ICON_CLOSE))),
       el("button", { class: "btn", textContent: "Open", onclick: () => navigateFolder(path) }),
       el("button", { class: "btn", textContent: "New secret here", onclick: () => openAdd(path) }),
-      el("button", { class: "btn", textContent: "Temporary access for folder…", onclick: () => openFolderDetail(path) }),
-      ...(path === "aws" || path.startsWith("aws/") || path === "sources" || path.startsWith("sources/") ? [] : [el("button", { class: "btn", textContent: "Rename or move…", onclick: () => openMoveFolder(path, items) })]),
-      el("button", { class: "btn danger-text", textContent: "Delete folder…", onclick: () => deleteFolder(path, items) })));
+      el("button", { class: "btn", textContent: "Temporary access for folder", onclick: () => openFolderDetail(path) }),
+      ...(path === "aws" || path.startsWith("aws/") || path === "sources" || path.startsWith("sources/") ? [] : [folderYolos(path).length
+        ? el("button", { class: "btn danger-text", textContent: "End YOLO", "aria-label": `End YOLO for ${folderYolos(path).map((y) => granteeName(y.to)).join(" and ")} to ${path}/`, onclick: () => endYolo(path) })
+        : el("button", { class: "btn danger-text", textContent: "YOLO for agents", onclick: () => openYolo(path, items) })]),
+      ...(path === "aws" || path.startsWith("aws/") || path === "sources" || path.startsWith("sources/") ? [] : [el("button", { class: "btn", textContent: "Rename or move", onclick: () => openMoveFolder(path, items) })]),
+      el("button", { class: "btn danger-text", textContent: "Delete folder", onclick: () => deleteFolder(path, items) })));
   menu.addEventListener("toggle", () => {
     if (!menu.open) return;
     document.querySelectorAll(".folder-menu[open]").forEach((other) => { if (other !== menu) other.open = false; });
@@ -585,6 +715,7 @@ function folderRow(path, items, matches) {
     el("div", { class: "row-name" }, el("button", { class: "group-toggle leaf", textContent: path.slice(currentFolder ? currentFolder.length + 1 : 0) + "/", onclick: () => navigateFolder(path) }),
       el("span", { class: "muted small", textContent: matches.length === items.length ? (path === "aws" ? `AWS profiles · ${items.length}` : "This Mac") : `${matches.length} of ${items.length} match` })),
     el("span", { class: "muted small", textContent: plural(matches.length, "item") }),
+    soonestYolo(path) ? el("span", { class: "tag yolo", textContent: `YOLO · ${durShort(soonestYolo(path).expires - Date.now() / 1000)}`, title: folderYolos(path).map((y) => `${y.to_label} · ${endsAt(y.expires)}`).join("\n") }) : null,
     levels.length === 1 ? levelBadge(items[0]) : el("span", { class: "muted small", textContent: `Mixed: ${levels.length} levels` }), menu), () => navigateFolder(path));
 }
 
@@ -605,7 +736,7 @@ const EXPOSURE = [
   { id: "agents-touch", short: "Touch ID", label: "Agents with Touch ID", glyph: "agents-touch", test: (s) => accessOf(s) === "agents-touch" },
   { id: "me", short: "Only me", label: "Only me", glyph: "me-touch", test: (s) => accessOf(s) === "me-touch" || accessOf(s) === "me" },
   { id: "public", short: "Public", label: "Public", glyph: "public", test: (s) => accessOf(s) === "public" },
-  { id: "lease", short: "Temporary", label: "Temporary access", glyph: null, test: (s) => !!s.lease, optional: true },
+  { id: "lease", short: "Temporary", label: "Temporary access", glyph: null, test: (s) => leasesOf(s).length > 0, optional: true },
 ];
 // One short line per level for the legend (condensed from the ACCESS_LEVELS hints).
 const LEVEL_LEGEND = [
@@ -667,7 +798,7 @@ function clearExposure() {
 function searchFields(s) {
   const fields = [{ text: s.name }, { text: accessLevel(accessOf(s)).label, weight: 0.5 }];
   if (s.public) fields.push({ text: "public", weight: 0.5 });
-  if (s.lease) fields.push({ text: "temporary access lease", weight: 0.5 });
+  if (leasesOf(s).length) fields.push({ text: "temporary access lease", weight: 0.5 });
   if (isAws(s.name)) {
     const m = freshMeta(s), r = ssoRegistered[s.name], portal = r?.portal || awsPortalFor(s);
     const account = r?.account || (m && m.sso ? m.account : "");
@@ -769,7 +900,9 @@ function renderSecrets() {
   $("empty").hidden = rows.childElementCount > 0;
   $("empty-text").textContent = secrets.length ? "Nothing matches the filter." : "Your folders will live here";
   $("empty-hint").hidden = secrets.length > 0;
-  $("leases-end-all").hidden = !secrets.some((s) => s.lease);
+  $("leases-end-all").hidden = !yoloError && !secrets.some((s) => leasesOf(s).length) && !Object.keys(yolos).some((p) => folderYolos(p).length);
+  const endAllNote = endAllYoloNote(Object.keys(yolos).flatMap(folderYolos));
+  $("leases-end-all").setAttribute("aria-label", ["End all temporary access", endAllNote].filter(Boolean).join(". "));
   $("more-title").textContent = `More · ${currentFolder ? currentFolder + "/" : "Secrets"}`;
   const unbacked = secrets.filter((s) => !s.has_backup).length;
   const banner = $("backup-banner");
@@ -925,6 +1058,7 @@ function whoLabel(ev) {
 const ACTION_LABEL = {
   run: "Used", get: "Revealed", copy: "Copied", view: "Viewed (public)", add: "Saved", policy: "Access changed", rm: "Deleted", rename: "Renamed",
   lease: "Temporary access given", revoke: "Temporary access ended", "lease-ended": "Temporary access ended (access changed)",
+  "yolo-start": "YOLO started", "yolo-end": "YOLO ended", "yolo-expired": "YOLO expired", "yolo-used": "Used through YOLO",
   "lease-used-up": "Temporary access used up", "lease-expired": "Temporary access expired", "aws-describe": "AWS profile details read",
   "backup-rotate": "Backup re-made", recover: "Recovered", config: "Settings changed", init: "Set up", "keys-upgrade": "Agent key added",
   "sso-login": "AWS sign-in", "sso-logout": "AWS sign-out", "sso-portal": "AWS portal saved", "sso-portal-rm": "AWS portal removed",
@@ -949,7 +1083,9 @@ function eventSummary(ev) {
   const d = ev.detail || {};
   if (ev.action === "run" && d.context) return d.context;
   if (ev.action === "lease") { const l = scopeLabel(d.scope); return `to ${d.to || "?"} for ${d.hours}h · ${d.expires > Date.now() / 1000 ? "until" : "ended"} ${relUntil(d.expires)}${l ? " · " + l : ""}`; }
+  if (ev.action.startsWith("yolo-")) return `${d.folder || "?"}/ · ${d.grantee ? granteeName(d.grantee) : "?"}${d.why ? ` · ${d.why}` : ""}`;
   if (ev.action === "lease-ended") return d.why || "";
+  if (ev.action === "revoke" || ev.action === "lease-expired" || ev.action === "lease-used-up") return d.to ? `for ${d.to}` : "";
   if (ev.action === "policy") {
     const parts = [];
     if (d.tier) parts.push(`Touch ID ${d.tier === "bio" ? "on" : "off"}`);
@@ -989,13 +1125,14 @@ async function openFolderDetail(path) { detail = { kind: "folder", name: path };
 
 async function showDetail() {
   const dlg = $("detail-dialog");
+  seenLeases = { scope: "", keys: new Set() };
   $("lease-cwd").value = "";
   $("lease-cmds").value = "";
   $("lease-uses").value = "";
   $("lease-hours").value = "2";
   $("lease-to").replaceChildren(el("option", { value: "claude", textContent: "claude · any session" }));
   if (!dlg.open) openDialog(dlg);
-  await renderDetail();
+  await renderDetail({ initializeGrantees: true });
 }
 
 function detailTargets() {
@@ -1005,7 +1142,133 @@ function detailTargets() {
     : secrets.filter((s) => s.name.startsWith(detail.name + "/"));
 }
 
-async function renderDetail() {
+function detailEndPatterns() {
+  const names = detailTargets().filter((s) => !s.public).map((s) => s.name);
+  if (detail?.kind === "folder") names.push(detail.name + "/");
+  return names;
+}
+
+// One secret holds at most this many temporary accesses (one per agent); the daemon enforces it.
+const MAX_LEASES_PER_SECRET = 8;
+
+// The agent chosen in the Give-access select, in the daemon's grantee shape.
+function chosenGrantee() {
+  const v = $("lease-to").value;
+  if (v === "any" || v === "") return { type: "any" };
+  return v.startsWith("session:") ? { type: "session", value: v.slice(8) } : { type: "kind", value: v };
+}
+
+// "pi", "pi and claude", "pi, claude and codex".
+const joinNames = (names) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
+
+// "Any folder" or "Only in ~/code/app", then program and use limits.
+function leaseScopeLine(sc = {}) {
+  const v = [sc.cwd ? `Only in ${sc.cwd.replace(/^\/Users\/[^/]+/, "~")}` : "Any folder"];
+  if (sc.cmds?.length) v.push(`only ${sc.cmds.map((c) => (c.path || c).split("/").pop()).join(", ")}`);
+  if (sc.max_uses) v.push(`${sc.max_uses} uses max`);
+  return v.join(" · ");
+}
+
+// "ends 01:26", with the day when it is not today.
+function endsAt(ts) {
+  const d = new Date(ts * 1000);
+  return `ends ${d.toDateString() === new Date().toDateString() ? "" : `${d.toLocaleDateString([], { weekday: "short" })} `}${clock(d.getTime())}`;
+}
+
+function clockGlyph() {
+  const g = icon(ICON_CLOCK);
+  g.setAttribute("class", "lvl-glyph lvl-lease");
+  return g;
+}
+
+// One row per agent. For a folder, an agent's row covers every item it has access to.
+function leaseRow(who, items, onEnd) {
+  const uses = items.reduce((n, l) => n + (l.uses || 0), 0);
+  const soonest = items.reduce((a, b) => (a.expires < b.expires ? a : b));
+  const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End", "aria-label": `End temporary access for ${who}` });
+  end.addEventListener("click", () => onEnd(end));
+  return el("div", { class: "lrow" },
+    el("span", { class: "gly", "aria-hidden": "true" }, clockGlyph()),
+    el("span", { class: "t2" }, el("span", { class: "mono", textContent: who }),
+      el("small", { textContent: [items.length > 1 ? `${items.length} items` : "", leaseScopeLine(items[0].scope), `used ${uses}\u00d7`, endsAt(soonest.expires)].filter(Boolean).join(" · ") })),
+    el("span", { class: "hint", textContent: `${durShort(soonest.remaining)} left` }), end);
+}
+
+function renderLeaseRows(leasable, isFolder) {
+  const byAgent = new Map(); // grantee value -> { to, leases: [lease], names: [secret] }
+  for (const s of leasable) {
+    for (const l of leasesOf(s)) {
+      const key = granteeValue(l.to);
+      if (!byAgent.has(key)) byAgent.set(key, { to: l.to, leases: [], names: [] });
+      byAgent.get(key).leases.push(l);
+      byAgent.get(key).names.push(s.name);
+    }
+  }
+  const covered = [...new Map(leasable.flatMap(yolosFor).map((y) => [JSON.stringify([y.path, y.to]), y])).values()];
+  const affected = endAllYolosFor(detailEndPatterns());
+  $("lease-active").hidden = byAgent.size === 0 && !affected.length && !yoloError;
+  $("lease-end-all").hidden = byAgent.size === 0 && !affected.length && !yoloError;
+  const endAllNote = endAllYoloNote(affected);
+  $("lease-end-all-note").textContent = endAllNote;
+  $("lease-end-all-note").hidden = !endAllNote;
+  $("lease-end-all").setAttribute("aria-label", endAllNote ? `End all. ${endAllNote}` : "End all");
+  $("lease-count").textContent = isFolder ? plural(byAgent.size, "agent") : `${byAgent.size} of ${MAX_LEASES_PER_SECRET}${covered.length ? ` · ${covered.length} YOLO` : ""}`;
+  const rows = [...byAgent.values()].sort((a, b) => Math.min(...a.leases.map((l) => l.expires)) - Math.min(...b.leases.map((l) => l.expires)));
+  const nodes = [...rows.map((r) => leaseRow(granteeName(r.to), r.leases, (btn) => endLeases(r.names, r.to, btn))), ...covered.map(yoloAccessRow)];
+  const scope = `${detail.kind}:${detail.name}`;
+  const keys = [...rows.map((r) => granteeValue(r.to)), ...covered.map((y) => `folder:${y.path}:${granteeValue(y.to)}`)];
+  if (seenLeases.scope === scope) nodes.forEach((n, i) => { if (!seenLeases.keys.has(keys[i])) n.classList.add("row-in"); });
+  seenLeases = { scope, keys: new Set(keys) };
+  $("lease-rows").replaceChildren(...nodes, ...(yoloError ? [el("p", { class: "form-error", role: "alert", textContent: yoloError })] : []));
+}
+
+let seenLeases = { scope: "", keys: new Set() };
+
+// Button and help for the agent chosen in the select: replace its access, add a separate one,
+// or stop when the secret already has the most. Other agents' access is never touched.
+function syncLeaseControls() {
+  if (!detail) return;
+  const items = detailTargets();
+  if (!items.length) return;
+  const isFolder = detail.kind === "folder";
+  const leasable = items.filter((s) => !s.public);
+  const chosen = chosenGrantee();
+  const key = granteeValue(chosen), name = granteeName(chosen);
+  const has = (s) => leasesOf(s).some((l) => granteeValue(l.to) === key);
+  const haveIt = leasable.filter(has);
+  const full = leasable.some((s) => !has(s) && leasesOf(s).length >= MAX_LEASES_PER_SECRET);
+  const others = [...new Set(leasable.flatMap((s) => leasesOf(s)).filter((l) => granteeValue(l.to) !== key).map((l) => granteeName(l.to)))];
+  const keep = others.length ? ` ${joinNames(others)} ${others.length > 1 ? "keep" : "keeps"} theirs.` : "";
+  const grant = $("lease-grant");
+  grant.disabled = full || !$("lease-to").value;
+  grant.textContent = haveIt.length ? (isFolder ? `Replace ${name}'s access on all ${leasable.length}` : `Replace ${name}'s access`)
+    : isFolder ? `Give access to all ${leasable.length}` : "Give access";
+  let help;
+  if (leasable.length === 0) {
+    help = "Public entries are always available to agents; there's nothing to give.";
+  } else if (full) {
+    help = isFolder ? `Some items here already have ${MAX_LEASES_PER_SECRET} temporary accesses. End one first.` : `This secret already has ${MAX_LEASES_PER_SECRET} temporary accesses. End one first.`;
+  } else if (isFolder) {
+    const replaces = haveIt.length ? ` Replaces ${name}'s existing access on ${plural(haveIt.length, "item")} and resets its use count; other agents keep theirs.` : others.length ? " Other agents keep their temporary access." : "";
+    help = `Lets the chosen agent use all ${leasable.length} non-public items in ${detail.name}/ without Touch ID until it ends, including ones that normally refuse agents. Covers what's in the folder now, not items added later. One Touch ID approves it.${replaces}`;
+  } else {
+    const s = items[0];
+    const relation = haveIt.length ? `Replaces ${name}'s temporary access and resets its use count.${keep}` : others.length ? `Adds a separate temporary access for ${name}.${keep}` : "";
+    const base = !s.agent_allowed
+      ? "This normally refuses agents. Temporary access lets the chosen agent use it anyway, without Touch ID, until it ends. Giving it asks for Touch ID once."
+      : s.tier === "bio"
+        ? (haveIt.length ? "Giving it asks for Touch ID once." : `Lets ${name} use this without a Touch ID prompt until it ends. Giving it asks for Touch ID once.`)
+        : "Agents can already use this without a prompt. Temporary access only records who it's for and until when; ending it doesn't block agents.";
+    help = [relation, base].filter(Boolean).join(" ");
+  }
+  $("lease-help").textContent = help;
+  $("lease-help").hidden = help === "";
+  const controlsHidden = document.querySelector("#lease-form .lease-controls").hidden;
+  $("lease-touch-note").hidden = controlsHidden || help !== ""; // the banner above already says Touch ID is asked once
+  $("lease-touch-note").textContent = "Touch ID is asked once to confirm. ";
+}
+
+async function renderDetail({ initializeGrantees = false } = {}) {
   const d = detail;
   if (!d) return;
   const items = detailTargets();
@@ -1021,52 +1284,24 @@ async function renderDetail() {
     const s = items[0];
     const id = accessOf(s);
     $("detail-sub").textContent = `${isAws(s.name) ? "AWS profile · " : ""}${accessLevel(id).label} · updated ${relTime(s.updated)}`;
-    $("detail-access").textContent = accessDetail(id);
+    $("detail-access").textContent = yoloOverride(s) || accessDetail(id);
     $("detail-access").hidden = false;
   }
 
 
-  // Lease state. Any non-public secret can be leased; for a folder it's every one inside.
+  // Temporary access. Any non-public secret can have it; for a folder it's every one inside.
   const leasable = items.filter((s) => !s.public);
-  const leased = leasable.filter((s) => s.lease);
-  $("lease-active").hidden = leased.length === 0;
-  if (leased.length) {
-    const soonest = leased.reduce((a, b) => (a.lease.expires < b.lease.expires ? a : b)).lease;
-    const whom = [...new Set(leased.map((s) => s.lease.to_label))].join(", ");
-    $("lease-active-text").textContent = isFolder
-      ? `${leased.length} of ${leasable.length} given to ${whom}`
-      : `Given to ${whom} · ${durShort(soonest.remaining)} left`;
-    const lim = scopeLabel(leased[0].lease.scope);
-    const uses = leased.reduce((n, s) => n + (s.lease.uses || 0), 0);
-    $("lease-active-sub").textContent = `${isFolder ? "First ends" : "Until"} ${fullTime(soonest.expires)}${lim ? ` \u00b7 ${lim}` : ""} \u00b7 used ${uses}\u00d7. Ends early if you block agents, change the value, or the Karambit daemon restarts; then the access level applies again.`;
-  }
+  renderLeaseRows(leasable, isFolder);
   const controls = document.querySelector("#lease-form .lease-controls");
   // Agents · no prompt: a grant changes nothing, so offer the real fix instead.
   const noPrompt = !isFolder && accessOf(items[0]) === "agents";
   controls.hidden = leasable.length === 0 || noPrompt;
+  $("lease-form-title").hidden = controls.hidden;
   $("lease-grant").hidden = controls.hidden;
   document.querySelector("#lease-form .lease-limits").hidden = noPrompt || leasable.length === 0;
   $("lease-require-touch").hidden = !noPrompt;
   syncDetailPrimary();
-  $("lease-grant").textContent = leased.length ? (isFolder ? "Give all again" : "Replace temporary access") : isFolder ? `Give access to all ${leasable.length}` : "Give access";
-  const cli = isFolder && leased.length ? ` Replaces ${leased.length} existing grants and resets their use counts.` : "";
-  // The banner is only for a real warning or an explanation of why there is no form. The normal
-  // Touch ID entry is covered by the sentence above plus the grey hint below, so it stays empty.
-  const help = leasable.length === 0
-    ? "Public entries are always available to agents; there's nothing to give."
-    : isFolder
-      ? `Lets the chosen agent use all ${leasable.length} non-public items in ${d.name}/ without Touch ID until it ends, including ones that normally refuse agents. Covers what's in the folder now, not items added later. One Touch ID approves it.${cli}`
-      : !items[0].agent_allowed
-        ? `This normally refuses agents. Temporary access lets the chosen agent use it anyway, without Touch ID, until it ends. Giving it asks for Touch ID once.${cli}`
-        : items[0].tier === "bio"
-          ? ""
-          : `Agents can already use this without a prompt. Temporary access only records who it's for and until when; ending it doesn't block agents.${cli}`;
-  $("lease-help").textContent = help;
-  $("lease-help").hidden = help === "";
-  $("lease-touch-note").hidden = controls.hidden || help !== ""; // warnings above already say Touch ID is asked once
-  // Touch ID entry with agents allowed: no warning banner, but keep what the grant does as a grey hint.
-  const bioAgents = !isFolder && leasable.length > 0 && items[0].agent_allowed && items[0].tier === "bio";
-  $("lease-touch-note").textContent = `${bioAgents ? "Lets the chosen agent use this without a Touch ID prompt until it ends. " : ""}Touch ID is asked once to confirm. `;
+  syncLeaseControls();
 
   // Activity: per secret, or merged across the folder.
   const names = isFolder ? items.map((s) => s.name) : [d.name];
@@ -1079,19 +1314,29 @@ async function renderDetail() {
   } catch { /* toast shown */ }
   if (detail !== d) return;
 
-  // Offer the recent agent sessions as lease targets ("only this session").
-  const sessions = new Map();
-  for (const ev of events) if (ev.session && ev.kind && !sessions.has(ev.session)) sessions.set(ev.session, ev);
-  const to = $("lease-to");
-  const base = ["pi", "claude", "codex", "kiro", "cursor"];
-  const kinds = [...new Set(events.filter((e) => e.kind).map((e) => e.kind))].filter((k) => !base.includes(k));
-  const typeOpts = [["any", "Any agent"], ...base.concat(kinds).map((k) => [k, `Any ${k} agent`])];
-  const sessOpts = [...sessions.values()].slice(0, 6).map((e) => [`session:${e.session}`, `Only ${e.kind} ${whoLabel(e).sess} (${e.cwd ? e.cwd.split("/").slice(-1)[0] + ", " : ""}${relTime(e.ts)})`]);
-  const opts = [...typeOpts, ...sessOpts];
-  const prev = to.value;
-  const optGroup = (label, list) => el("optgroup", { label }, ...list.map(([v, l]) => el("option", { value: v, textContent: l })));
-  to.replaceChildren(optGroup("Agent type", typeOpts), ...(sessOpts.length ? [optGroup("Recent sessions", sessOpts)] : []));
-  if (opts.some(([v]) => v === prev)) to.value = prev;
+  // Refresh access state and activity without changing any editable draft controls.
+  if (initializeGrantees) {
+    // Offer the recent agent sessions as lease targets ("only this session").
+    const sessions = new Map();
+    for (const ev of events) if (ev.session && ev.kind && !sessions.has(ev.session)) sessions.set(ev.session, ev);
+    const to = $("lease-to");
+    const base = ["pi", "claude", "codex", "kiro", "cursor"];
+    // Agents that already hold access are offered too, so their access can be replaced.
+    const holders = items.flatMap((s) => leasesOf(s)).filter((l) => l.to.type === "kind").map((l) => l.to.value);
+    const kinds = [...new Set([...events.filter((e) => e.kind).map((e) => e.kind), ...holders])].filter((k) => !base.includes(k));
+    const typeOpts = [["any", "Any agent"], ...base.concat(kinds).map((k) => [k, `Any ${k} agent`])];
+    const sessOpts = [...sessions.values()].slice(0, 6).map((e) => [`session:${e.session}`, `Only ${e.kind} ${whoLabel(e).sess} (${e.cwd ? e.cwd.split("/").slice(-1)[0] + ", " : ""}${relTime(e.ts)})`]);
+    const opts = [...typeOpts, ...sessOpts];
+    const prev = to.value;
+    const previousLabel = to.selectedOptions[0]?.textContent || prev;
+    const optGroup = (label, list) => el("optgroup", { label }, ...list.map(([v, l]) => el("option", { value: v, textContent: l })));
+    to.replaceChildren(optGroup("Agent type", typeOpts), ...(sessOpts.length ? [optGroup("Recent sessions", sessOpts)] : []));
+    if (prev && !opts.some(([v]) => v === prev)) {
+      to.append(optGroup("Selected agent", [[prev, previousLabel]]));
+    }
+    to.value = prev;
+    syncLeaseControls();
+  }
 
   renderActivity(events, isFolder);
 }
@@ -1109,7 +1354,7 @@ function renderActivityInto(rows, events, showSecret, onSecret = null) {
   for (const ev of events) {
     const who = whoLabel(ev);
     const label = actionLabel(ev);
-    const via = ev.detail && Array.isArray(ev.detail.via_lease) ? " via lease" : "";
+    const via = ev.detail && Array.isArray(ev.detail.via_lease) ? " via temporary access" : "";
     const summary = eventSummary(ev);
     const where = [ev.cwd, ev.branch && `\u2387 ${ev.branch}`].filter(Boolean).join("  ");
     const names = ev.secrets || [];
@@ -1125,7 +1370,7 @@ function renderActivityInto(rows, events, showSecret, onSecret = null) {
     const toggle = el("button", { type: "button", class: "ev-toggle", textContent: `${label}${via}`, "aria-expanded": "false", "aria-controls": moreId });
     const what = el("div", { class: "ev-main" },
       el("div", { class: `ev ${ev.ok ? "" : "denied"}` }, el("span", { class: "dot" }), toggle, secretEl),
-      summary ? el("code", { class: "ev-cmd", textContent: summary, title: ev.action === "lease" && ev.detail?.expires ? `${summary}\nEnds ${fullTime(ev.detail.expires)}` : summary }) : null,
+      summary ? el("code", { class: "ev-cmd", textContent: summary, title: ev.action === "lease" && ev.detail?.expires ? `${summary}\n${endsAt(ev.detail.expires)}` : summary }) : null,
       ev.ok ? null : el("span", { class: "err", textContent: ev.err || "denied" }),
       where ? el("span", { class: "cwd", textContent: where, title: "Working directory and git branch" }) : null);
 
@@ -1155,6 +1400,7 @@ async function grantLease() {
   if (!$("lease-uses").reportValidity()) return;
   const hours = Number($("lease-hours").value);
   const to = $("lease-to").value;
+  if (!to) return;
   const names = detailTargets().filter((s) => !s.public).map((s) => s.name);
   const cwd = $("lease-cwd").value.trim() || null;
   const cmds = $("lease-cmds").value.split(",").map((x) => x.trim()).filter(Boolean);
@@ -1182,10 +1428,10 @@ async function requireTouchInstead() {
   renderDetail();
 }
 
-async function revokeLease() {
-  const names = detailTargets().filter((s) => !s.public).map((s) => s.name);
+// End one agent's temporary access (`to`) or all of them (`to` null) on these secrets.
+async function endLeases(names, to, button) {
   try {
-    const r = await call("lease_revoke", { names }, $("lease-revoke"));
+    const r = await call("lease_revoke", { names, to }, button);
     toast(r.length === 1 ? "Temporary access ended" : `Ended temporary access to ${r.length} items`);
   } catch { return; }
   await loadSecrets();
@@ -2203,7 +2449,13 @@ function clock(t = Date.now()) { return new Date(t).toLocaleTimeString([], { hou
 
 async function loadStatusPage() {
   let d;
-  try { [d, cfg] = await Promise.all([call("status_full", {}, $("status-refresh")), call("get_config"), refreshSso()]); } catch { return; }
+  try { [d, cfg] = await Promise.all([call("status_full", {}, $("status-refresh")), call("get_config"), refreshSso()]); }
+  catch {
+    $("status-when").textContent = "Status unknown · refresh failed";
+    $("status-leases-count").textContent = "Unknown";
+    $("status-leases").replaceChildren(el("p", { class: "form-error", role: "alert", textContent: "Temporary access status unknown. Refresh to try again." }));
+    return;
+  }
   if (!secrets.length) secrets = await call("list").catch(() => secrets);
   const s = d.status || {}, h = s.helper || {}, c = s.caller || {};
   $("status-when").textContent = "Checked just now";
@@ -2233,17 +2485,19 @@ async function loadStatusPage() {
 
 function renderLeases(leases) {
   $("status-leases-count").textContent = leases.length ? `${leases.length} active` : "";
+  // One row per agent and secret: the same secret can appear twice, and End ends only that row.
   $("status-leases").replaceChildren(...(leases.length ? leases.map((l) => {
     const meta = secrets.find((x) => x.name === l.name);
-    const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End", "aria-label": `End temporary access to ${l.name}` });
+    const who = granteeName(l.to);
+    const end = el("button", { type: "button", class: "btn sm danger-ghost", textContent: "End", "aria-label": `End ${l.yolo ? "YOLO" : "temporary access"} for ${who} to ${l.name}` });
     end.addEventListener("click", async () => {
-      try { await call("lease_revoke", { names: [l.name] }, end); toast("Temporary access ended"); } catch { return; }
+      try { await (l.yolo ? call("yolo_end", { path: l.name.replace(/\/$/, ""), to: l.to }, end) : call("lease_revoke", { names: [l.name], to: l.to }, end)); toast(l.yolo ? "YOLO ended" : "Temporary access ended"); } catch { return; }
       await loadSecrets(); loadStatusPage();
     });
     return el("div", { class: "lrow" },
       el("span", { class: "gly", "aria-hidden": "true" }, levelGlyph(meta ? accessOf(meta) : "agents-touch")),
-      el("span", { class: "t2" }, el("span", { class: "mono", style: "font-size:13px", textContent: l.name }),
-        el("small", { textContent: [l.to_label, l.uses ? `used ${l.uses}×` : "", leaseScopeText(l.scope || {})].filter(Boolean).join(" · ") })),
+      el("span", { class: "t2" }, el("span", { class: "mono", style: "font-size:13px", textContent: l.name }), l.yolo ? el("span", { class: "tag yolo", textContent: "YOLO", style: "margin-left:8px" }) : null,
+        el("small", { textContent: l.yolo ? `${who} · everything in ${l.name}` : [who, `used ${l.uses || 0}×`, leaseScopeLine(l.scope || {})].join(" · ") })),
       el("span", { class: "hint", textContent: `${durShort(l.remaining)} left` }), end);
   }) : [el("div", { class: "lrow empty", textContent: "No temporary access right now." })]));
 }
@@ -2320,14 +2574,6 @@ async function explainPolicy() {
     out.replaceChildren(el("span", {}, el("b", { textContent: word }), `${by}. The secret’s own access level still applies on top.`));
     out.hidden = false;
   } catch { out.hidden = true; }
-}
-
-function leaseScopeText(sc) {
-  const v = [];
-  if (sc.cwd) v.push(`only in ${sc.cwd.replace(/^\/Users\/[^/]+/, "~")}`);
-  if (sc.cmds?.length) v.push(`only ${sc.cmds.map((c) => (c.path || c).split("/").pop()).join(", ")}`);
-  if (sc.max_uses) v.push(`${sc.max_uses} uses max`);
-  return v.join(" · ");
 }
 
 // Pills: OK green, Reachable amber, Unclear amber outline, Not checked grey.
@@ -2613,7 +2859,7 @@ function accessPicker(box, group, levels) {
   // Public is a separate final choice: own radio name so the 3 levels announce "1 of 3".
   const step = (l) => el("label", { class: `access-step lvl-${l.id}` },
     el("input", { type: "radio", name: l.id === "public" ? `${group}-public` : group, value: l.id }),
-    el("span", {}, levelGlyph(l.id), l.id === "public" ? "Mark as public (not a secret)…" : l.label));
+    el("span", {}, levelGlyph(l.id), l.id === "public" ? "Mark as public (not a secret)" : l.label));
   box.replaceChildren(el("div", { class: "access-segments" }, ...levels.filter((l) => l.id !== "public").map(step)),
     el("p", { class: "hint access-hint" }));
   const pub = levels.find((l) => l.id === "public");
@@ -2636,7 +2882,7 @@ function syncAccessHint(box) {
 function compactAccessRows(box) {
   box.querySelectorAll(".access-step").forEach((step) => {
     const input = step.querySelector("input"), span = step.querySelector("span");
-    const label = input.value === "public" ? "Mark as public…" : accessLevel(input.value).label;
+    const label = input.value === "public" ? "Mark as public" : accessLevel(input.value).label;
     const glyph = span.firstElementChild;
     span.replaceChildren(el("i", { class: "access-radio", "aria-hidden": "true" }), glyph, el("span", { class: "access-label" }, el("b", { textContent: label }), el("small", { class: "access-explain", textContent: COMPACT_ACCESS_HINT[input.value] })));
   });
@@ -2649,6 +2895,11 @@ function policyPicker(s) {
   if (selected) selected.checked = true;
   syncAccessHint(box);
   compactAccessRows(box);
+  const override = yoloOverride(s);
+  if (override) {
+    const explain = box.querySelector("input:checked")?.closest(".access-step").querySelector(".access-explain");
+    if (explain) explain.textContent = `Stored level. ${override}`;
+  }
   const status = el("p", { class: "access-status small", role: "status", textContent: accessBusy.get(s.name) || accessError.get(s.name)?.text || "" });
   box.append(status);
   box.querySelectorAll("input").forEach((n) => { n.disabled = accessBusy.has(s.name); });
@@ -2846,15 +3097,32 @@ async function submitMoveFolder(ev) {
 
 // ---------- A+ details panel ----------
 function wrapName(name) { return name.split(/(?<=[\/-])/).flatMap((part) => [document.createTextNode(part), el("wbr")]); }
+function inspectorTemporaryAccess(s) {
+  const held = leasesOf(s);
+  return [
+    ...held.map((l) => {
+      const who = granteeName(l.to);
+      const end = el("button", { class: "btn sm danger-ghost", textContent: "End", "aria-label": `End temporary access for ${who} to ${s.name}`, onclick: async () => {
+        try { await call("lease_revoke", { names: [s.name], to: l.to }, end); await loadSecrets(); } catch { /* toast shown */ }
+      } });
+      return el("div", { class: "lrow" }, el("span", { class: "t2" }, el("span", { class: "mono", textContent: who }),
+        el("small", { textContent: `${durShort(l.remaining)} left · used ${l.uses || 0}× · ${scopeLabel(l.scope) || "No program or folder limits"}` })), end);
+    }),
+    ...yoloAccessRows(s),
+    ...(!held.length && !yolosFor(s).length && !yoloError ? [el("p", { class: "small", textContent: "No temporary access" })] : [])
+  ];
+}
 function renderInspector() {
   const panel = $("inspector");
   // Keep the existing AWS controls and their event listeners when rebuilding the panel.
   const aws = $("aws-detail");
   if (panel.contains(aws)) $("detail-dialog").querySelector("form").prepend(aws);
   const s = secrets.find((x) => x.name === selectedSecret);
+  const wasHidden = panel.hidden;
   panel.hidden = !s;
   panel.replaceChildren();
   if (!s) { renderAwsDetail(null); return; }
+  if (wasHidden) playIn(panel, "slide-in");
   const close = el("button", { class: "ibtn", "aria-label": "Close details", onclick: () => { selectedSecret = null; renderLists(); renderInspector(); } }, icon(ICON_CLOSE));
   const slash = s.name.lastIndexOf("/");
   panel.append(el("div", { class: "panel-heading" }, el("h2", { class: "mono-title panel-name" },
@@ -2873,17 +3141,10 @@ function renderInspector() {
   panel.append(policyPicker(s));
   if (accessError.has(s.name)) panel.append(el("p", { class: "form-error", role: "alert", textContent: accessError.get(s.name).text }));
   if (!s.public) {
+    const held = leasesOf(s);
     panel.append(el("h3", { class: "sec", textContent: "Temporary access" }),
-      el("p", { class: "small", textContent: s.lease ? `${s.lease.to_label} · ${durShort(s.lease.remaining)} left · used ${s.lease.uses || 0} times` : "No temporary access" }),
-      // DOM append() would print a null child as the text "null"; add the hint only when there is a lease.
-      ...(s.lease ? [el("p", { class: "hint", textContent: scopeLabel(s.lease.scope) || "No program or folder limits" })] : []),
-      el("button", { class: "btn sm", textContent: s.lease ? "Change…" : "Give access…", onclick: () => { detail = { kind: "secret", name: s.name }; showDetail(); } }));
-    if (s.lease) {
-      const end = el("button", { class: "btn sm", textContent: "End", onclick: async () => {
-        try { await call("lease_revoke", { names: [s.name] }, end); await loadSecrets(); } catch { /* toast shown */ }
-      } });
-      panel.append(end);
-    }
+      ...inspectorTemporaryAccess(s),
+      el("button", { class: "btn sm", textContent: held.length ? "Change" : "Give access", onclick: () => { detail = { kind: "secret", name: s.name }; showDetail(); } }));
   }
   if (!isAws(s.name)) {
     const cmd = `karambit run -e VAR=${s.name} -- command`;
@@ -3173,9 +3434,17 @@ $("signin-dialog").addEventListener("cancel", (e) => {
   cancelSignIn();
   $("signin-dialog").close();
 });
-// Sign-in state changes outside this window (CLI, expiry): re-read on focus and every minute.
-window.addEventListener("focus", () => { if (!$("view-init").hidden) return; loadSsoStatus().then(() => { if (!$("view-secrets").hidden) renderSecrets(); }); });
-setInterval(() => { if (document.hidden || !$("view-init").hidden) return; loadSsoStatus().then(() => { if (!$("view-secrets").hidden && !$("rows").contains(document.activeElement)) renderSecrets(); }); }, 60000);
+// Runtime access and sign-in state can change through the CLI or expiry.
+async function refreshRuntimeAccess() {
+  await loadSsoStatus();
+  await loadYolos();
+  renderYoloBanner();
+  renderInspector();
+  if ($("detail-dialog").open) await renderDetail();
+  if (!$("view-secrets").hidden && !$("rows").contains(document.activeElement)) renderSecrets();
+}
+window.addEventListener("focus", () => { if ($("view-init").hidden) refreshRuntimeAccess(); });
+setInterval(() => { if (!document.hidden && $("view-init").hidden) refreshRuntimeAccess(); }, 60000);
 $("audit-secret").addEventListener("input", () => { auditSeq++; clearTimeout(auditTimer); auditTimer = setTimeout(applyAuditFilter, 150); });
 for (const r of document.querySelectorAll('input[name="audit-only"]')) r.addEventListener("change", applyAuditFilter);
 $("audit-secret").addEventListener("keydown", (e) => {
@@ -3186,15 +3455,19 @@ $("audit-secret").addEventListener("keydown", (e) => {
 });
 $("lease-grant").addEventListener("click", grantLease);
 $("leases-end-all").addEventListener("click", async () => {
-  const n = secrets.filter((s) => s.lease).length;
-  if (!(await confirmDialog("End all temporary access?", `Temporary access to ${n} ${n === 1 ? "item" : "items"} ends now. Each one's access level applies again: Touch ID where it's on, refused where agents are blocked.`, "End all"))) return;
+  const n = secrets.filter((s) => leasesOf(s).length).length + Object.keys(yolos).filter((p) => folderYolos(p).length).length;
+  const endAllNote = endAllYoloNote(Object.keys(yolos).flatMap(folderYolos));
+  if (!(await confirmDialog("End all temporary access?", yoloError ? "YOLO status is unknown. End all temporary access, including any YOLO folders, now?" : [`Temporary access to ${n} ${n === 1 ? "item" : "items"}, including any YOLO folders, ends now. Each one's access level applies again: Touch ID where it's on, refused where agents are blocked.`, endAllNote].filter(Boolean).join(" "), "End all"))) return;
   try {
     const r = await call("lease_revoke_all", {}, $("leases-end-all"));
     toast(`Ended temporary access to ${r.length} ${r.length === 1 ? "item" : "items"}`);
   } catch { /* toast shown */ }
   loadSecrets();
 });
-$("lease-revoke").addEventListener("click", revokeLease);
+$("lease-end-all").addEventListener("click", () => {
+  endLeases(detailEndPatterns(), null, $("lease-end-all"));
+});
+$("lease-to").addEventListener("change", syncLeaseControls);
 $("status-refresh").addEventListener("click", loadStatusPage);
 $("more-close").append(icon(ICON_CLOSE));
 $("more-close").addEventListener("click", () => { $("more-menu").open = false; $("more-menu").querySelector("summary").focus(); });

@@ -60,6 +60,7 @@ prompts! {
     SsoLimit("sso_limit", portal, duration);
     SsoDecrypt("sso_decrypt");
     Grant("grant", names, grantee, hours, scope);
+    Yolo("yolo", folder, grantee, hours);
     SsoLogin("sso_login", portal, url, agent_count, profile_count, duration);
     SsoRegister("sso_register", profiles);
     SsoUse("sso_use", name, account, role);

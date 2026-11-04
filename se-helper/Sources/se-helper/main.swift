@@ -243,6 +243,7 @@ let promptTemplates: [String: (Int, ([String]) -> String)] = [
     "repoint_sso_portal": (3, { "repoint AWS SSO portal \($0[0]) to \($0[1]) in \($0[2])" }),
     "sso_limit": (2, { "let AWS SSO portal \($0[0]) stay signed in \($0[1])" }),
     "sso_decrypt": (0, { _ in "activate AWS SSO profiles" }),
+    "yolo": (3, { "start YOLO for folder \($0[0]) to \($0[1]) for \($0[2]) hours, including Only me keys and keys added later, without per-use Touch ID" }),
     "grant": (4, { "lease \($0[0]) to \($0[1]) for \($0[2]) hours, scope \($0[3])" }),
     "sso_login": (5, { "sign in to AWS SSO portal \($0[0]) at \($0[1]) and let agents use \($0[2]) of \($0[3]) SSO profiles, renewed \($0[4])" }),
     "sso_register": (1, { "activate AWS SSO profiles \($0[0])" }),

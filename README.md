@@ -43,7 +43,7 @@ karambit init --paper    # makes a paper backup key
 ```
 
 To upgrade, pull and run `./install.sh` again. The installed version asks for Touch ID to trust
-the new binaries before it replaces them. The upgrade stops the daemon, which ends active leases.
+the new binaries before it replaces them. The upgrade stops the daemon, which ends active leases and YOLO access.
 
 `init --paper` shows a backup key one time. Write it on paper and type it again to confirm.
 If you lose your Touch ID keys, `karambit recover` uses this key. It refuses, changing nothing, if
@@ -88,6 +88,15 @@ Detection is a heuristic: a caller that evades it is treated as a human.
   `karambit lease grant 'deploy/*' --hours 3 --cmd curl`
   Shells and bare interpreters (`node`, `python`, ...) can't be a `--cmd`, because they run any code.
   Pin the script instead: `--cmd node --script deploy.js`.
+  A secret holds one lease per agent, up to 8. A new grant to an agent replaces only that agent's lease.
+  End one with `karambit lease revoke NAME --to pi`, or all of them without `--to`.
+- **YOLO for a folder**: one Touch ID gives the chosen agent temporary access to every non-public key
+  below a folder, including Only me keys and keys added or moved there later through Karambit.
+  `karambit yolo start deploy --to pi --hours 6`
+  Keys keep their access level at rest. YOLO never makes a key Public or turns redaction off.
+  It ends at its end time, on End, when agents are blocked, or on daemon restart, not on screen lock.
+  Use `karambit yolo ls`, `karambit yolo end deploy --to pi`, or the app's red YOLO controls.
+  The app defaults to 6 hours; the limit is 7 days. See [coverage and limits](docs/reference.md#yolo-for-a-folder).
 - **Block**: `karambit block --all` refuses all agent requests until you unblock.
   It does not stop processes, and it cannot take back a secret that a program already has.
 

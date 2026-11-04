@@ -10,8 +10,11 @@ use crate::store::Paths;
 
 pub const MAX_HOURS: f64 = 24.0 * 7.0;
 
+/// Most temporary accesses one secret can hold at once (one per grantee).
+pub const MAX_PER_SECRET: usize = 8;
+
 /// Who a lease is for.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase", tag = "type", content = "value")]
 pub enum Grantee {
     /// Any agent caller.
