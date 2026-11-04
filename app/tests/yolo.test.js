@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const source = fs.readFileSync(require.resolve("../ui/app.js"), "utf8");
 function ui(yolos) {
-  const context = vm.createContext({ yolos, yoloError: "", Date, el: (tag, attrs) => ({ tag, ...attrs }), fullTime: String });
+  const context = vm.createContext({ yolos, yoloError: "", Date, el: (tag, attrs) => ({ tag, ...attrs }), endsAt: (ts) => `ends time:${ts}` });
   vm.runInContext(source.slice(source.indexOf("const folderYolos ="), source.indexOf("function renderYoloBanner()")), context);
   return (expression) => vm.runInContext(expression, context);
 }
@@ -71,7 +71,7 @@ test("renderInspector YOLO-only rows name folder, agent, end time and scoped End
   await end.onclick();
   assert.equal(JSON.stringify(fixture.requests), JSON.stringify([{ command: "yolo_end", args: { path: "stripe", to: { type: "kind", value: "claude" } } }]));
   assert.equal(fixture.refreshes(), 1);
-  assert.match(fixture.run('yoloOverride({ name: "stripe/key" })'), /YOLO on stripe\/ · claude: no prompt until time:/);
+  assert.match(fixture.run('yoloOverride({ name: "stripe/key" })'), /YOLO on stripe\/ · claude: no prompt · ends time:/);
 });
 test("renderInspector mixed rows retain YOLO after ending per-key access", async () => {
   const fixture = inspector({ stripe: [yoloRecord()] });
@@ -123,4 +123,97 @@ test("loadStatusPage replaces stale access rows with an unknown state on failure
   await fixture.run("loadStatusPage()");
   assert.equal(nodes.get("status-leases-count").textContent, "Unknown");
   assert.match(treeText(nodes.get("status-leases").children[0]), /Temporary access status unknown/);
+});
+
+test("YOLO override and access tooltips use the same endsAt time as rows", () => {
+  const fixture = inspector({ stripe: [yoloRecord()] }, {
+    fullTime: () => { throw new Error("Access end times must use endsAt"); },
+    clock: (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+  });
+  fixture.run(source.slice(source.indexOf("function endsAt("), source.indexOf("function clockGlyph(")));
+  fixture.run(source.slice(source.indexOf("function leaseTag("), source.indexOf("// YOLO:")));
+  const expected = fixture.run(`endsAt(${yoloRecord().expires})`);
+  assert.match(expected, /^ends /);
+  assert.ok(fixture.run('yoloOverride({ name: "stripe/key" })').endsWith(expected));
+  assert.ok(fixture.run('yoloTag({ name: "stripe/key" }).title').endsWith(expected));
+  assert.ok(treeText(fixture.run('yoloAccessRow(yolos.stripe[0])')).includes(expected));
+  assert.ok(fixture.run(`leaseTag({ leases: [{ to_label: "claude", remaining: 3600, expires: ${yoloRecord().expires} }] }).title`).endsWith(expected));
+  const title = fixture.run(`leaseTag({ leases: [
+    { to: { type: "kind", value: "claude" }, expires: ${yoloRecord().expires} },
+    { to: { type: "kind", value: "pi" }, expires: ${yoloRecord().expires} }
+  ] }).title`);
+  assert.equal(title, `claude · ${expected}\npi · ${expected}`);
+  assert.doesNotMatch(source, /fullTime\([^\n]*(?:\.expires|\.remaining)/);
+  assert.match(source, /\$\("detail-access"\)\.textContent = yoloOverride\(s\)/);
+});
+
+function endAllFixture(yolos, extra = {}) {
+  const nodes = new Map();
+  const fixture = inspector(yolos, {
+    $: (id) => {
+      if (!nodes.has(id)) nodes.set(id, {
+        attributes: {},
+        setAttribute(name, value) { this.attributes[name] = value; },
+        addEventListener(type, handler) { this[type] = handler; },
+        replaceChildren(...children) { this.children = children; },
+      });
+      return nodes.get(id);
+    },
+    MAX_LEASES_PER_SECRET: 8, plural: (n, name) => `${n} ${name}s`,
+    granteeValue: (to) => to.value,
+    leaseRow: () => ({ textContent: "Temporary access" }),
+    ...extra,
+  });
+  fixture.run(source.slice(source.indexOf("function renderLeaseRows("), source.indexOf("// Button and help for the agent chosen")));
+  return { ...fixture, nodes };
+}
+
+test("renderLeaseRows warns End all affects every key in each covering YOLO folder", () => {
+  const covered = ["stripe/sub/key"];
+  const fixture = endAllFixture({
+    stripe: [access({ path: "stripe", covered, to: { type: "kind", value: "claude" } }), access({ path: "stripe", covered, to: { type: "kind", value: "pi" } })],
+    "stripe/sub": [access({ path: "stripe/sub", covered, to: { type: "any" } })],
+    other: [access({ path: "other", covered: ["other/key"] })],
+  });
+  fixture.run('renderLeaseRows([{ name: "stripe/sub/key" }], false)');
+  const note = "End all also ends YOLO on stripe/, stripe/sub/ for every key in those folders.";
+  assert.equal(fixture.nodes.get("lease-end-all-note").textContent, note);
+  assert.equal(fixture.nodes.get("lease-end-all-note").hidden, false);
+  assert.equal(fixture.nodes.get("lease-end-all").hidden, false);
+  assert.equal(fixture.nodes.get("lease-end-all").attributes["aria-label"], `End all. ${note}`);
+  // A folder selection targets keys too, and must carry the same warning.
+  fixture.run('renderLeaseRows([{ name: "stripe/sub/key" }], true)');
+  assert.equal(fixture.nodes.get("lease-end-all-note").textContent, note);
+  const html = fs.readFileSync(require.resolve("../ui/index.html"), "utf8");
+  assert.match(html, /id="lease-end-all-note" class="hint" hidden><\/p>\s*<div class="actions"><button[^>]*id="lease-end-all"/);
+});
+
+test("renderLeaseRows removes the End all warning without live verified coverage", () => {
+  const fixture = endAllFixture({ stripe: [yoloRecord()] });
+  fixture.run('renderLeaseRows([{ name: "stripe/key" }], false)');
+  assert.equal(fixture.nodes.get("lease-end-all-note").textContent, "End all also ends YOLO on stripe/ for every key in that folder.");
+  for (const item of [
+    '{ name: "other/key", leases: [{ to: { type: "kind", value: "pi" }, expires: 1 }] }',
+    '{ name: "stripe/key", public: true }',
+  ]) {
+    fixture.run(`renderLeaseRows([${item}], false)`);
+    assert.equal(fixture.nodes.get("lease-end-all-note").hidden, true);
+    assert.equal(fixture.nodes.get("lease-end-all-note").textContent, "");
+    assert.equal(fixture.nodes.get("lease-end-all").attributes["aria-label"], "End all");
+  }
+  fixture.run('yolos.stripe[0].expires = 1; renderLeaseRows([{ name: "stripe/key" }], false)');
+  assert.equal(fixture.nodes.get("lease-end-all-note").hidden, true);
+  assert.equal(fixture.nodes.get("lease-end-all").hidden, true);
+});
+
+test("global End all confirmation lists every live YOLO folder", async () => {
+  const confirmations = [];
+  const fixture = endAllFixture({ stripe: [yoloRecord()], other: [access({ path: "other" })] }, {
+    secrets: [],
+    confirmDialog: async (...args) => { confirmations.push(args); return false; },
+  });
+  fixture.run(source.slice(source.indexOf('$("leases-end-all").addEventListener("click"'), source.indexOf('$("lease-end-all").addEventListener("click"')));
+  await fixture.nodes.get("leases-end-all").click();
+  assert.match(confirmations[0][1], /End all also ends YOLO on other\/, stripe\/ for every key in those folders\./);
+  assert.equal(fixture.requests.length, 0);
 });

@@ -490,7 +490,7 @@ function deleteButton(s) {
         ? `${display} will be removed from Karambit. ${awsMeta.get(s.name)?.sso ? "Your AWS access itself is unchanged." : "The keys themselves stay valid in AWS until they expire."}`
         : `${s.name} will be permanently removed.`,
       "This can't be undone: its offline backup copy is stored with it, so karambit recover can't bring it back.",
-      leasesOf(s).length === 1 ? `${leasesOf(s)[0].to_label} has temporary access until ${fullTime(leasesOf(s)[0].expires)}; that ends now.`
+      leasesOf(s).length === 1 ? `${leasesOf(s)[0].to_label} has temporary access (${endsAt(leasesOf(s)[0].expires)}); that ends now.`
         : leasesOf(s).length > 1 ? `${leasesOf(s).length} agents have temporary access to it; that ends now.` : null,
     ];
     if (!(await confirmDialog(aws ? "Delete AWS profile?" : "Delete secret?", lines, aws ? "Delete profile" : "Delete secret"))) return;
@@ -523,10 +523,10 @@ function leaseTag(s) {
   if (!all.length) return null;
   if (all.length === 1) {
     return el("span", { class: "tag lease", textContent: `Temporary access · ${durShort(all[0].remaining)}`,
-      title: `Given to ${all[0].to_label} until ${fullTime(all[0].expires)}` });
+      title: `Given to ${all[0].to_label} · ${endsAt(all[0].expires)}` });
   }
   return el("span", { class: "tag lease", textContent: `Temporary access · ${all.length} agents`,
-    title: all.map((l) => `${granteeName(l.to)} until ${fullTime(l.expires)}`).join("\n") });
+    title: all.map((l) => `${granteeName(l.to)} · ${endsAt(l.expires)}`).join("\n") });
 }
 
 // YOLO: a folder-wide, named, red temporary access that also covers keys added later.
@@ -541,7 +541,11 @@ async function loadYolos() {
 function yoloOverride(s) {
   if (s.public) return "";
   if (yoloError) return yoloError;
-  return yolosFor(s).map((y) => `YOLO on ${y.path}/ · ${granteeName(y.to)}: no prompt until ${fullTime(y.expires)}`).join("; ");
+  return yolosFor(s).map((y) => `YOLO on ${y.path}/ · ${granteeName(y.to)}: no prompt · ${endsAt(y.expires)}`).join("; ");
+}
+function endAllYoloNote(covered) {
+  const paths = [...new Set(covered.map((y) => y.path))].sort();
+  return paths.length ? `End all also ends YOLO on ${paths.map((p) => `${p}/`).join(", ")} for every key in ${paths.length === 1 ? "that folder" : "those folders"}.` : "";
 }
 function yoloAccessRow(y) {
   const who = granteeName(y.to);
@@ -556,7 +560,7 @@ function yoloAccessRows(s) {
 const soonestYolo = (path) => folderYolos(path).sort((a, b) => a.expires - b.expires)[0] || null;
 function yoloTag(s) {
   const y = s.public ? null : yoloOf(s.name);
-  return y ? el("span", { class: "tag yolo", textContent: "YOLO · no prompt", title: `${y.to_label} can use this without Touch ID until ${fullTime(y.expires)}` }) : null;
+  return y ? el("span", { class: "tag yolo", textContent: "YOLO · no prompt", title: `${y.to_label} can use this without Touch ID · ${endsAt(y.expires)}` }) : null;
 }
 function yoloAdded(s) {
   const added = !s.public && Object.keys(yolos).flatMap(folderYolos)
@@ -882,6 +886,8 @@ function renderSecrets() {
   $("empty-text").textContent = secrets.length ? "Nothing matches the filter." : "Your folders will live here";
   $("empty-hint").hidden = secrets.length > 0;
   $("leases-end-all").hidden = !yoloError && !secrets.some((s) => leasesOf(s).length) && !Object.keys(yolos).some((p) => folderYolos(p).length);
+  const endAllNote = endAllYoloNote(Object.keys(yolos).flatMap(folderYolos));
+  $("leases-end-all").setAttribute("aria-label", ["End all temporary access", endAllNote].filter(Boolean).join(". "));
   $("more-title").textContent = `More · ${currentFolder ? currentFolder + "/" : "Secrets"}`;
   const unbacked = secrets.filter((s) => !s.has_backup).length;
   const banner = $("backup-banner");
@@ -1179,6 +1185,10 @@ function renderLeaseRows(leasable, isFolder) {
   const covered = [...new Map(leasable.flatMap(yolosFor).map((y) => [JSON.stringify([y.path, y.to]), y])).values()];
   $("lease-active").hidden = byAgent.size === 0 && !covered.length && !yoloError;
   $("lease-end-all").hidden = byAgent.size === 0 && !covered.length && !yoloError;
+  const endAllNote = endAllYoloNote(covered);
+  $("lease-end-all-note").textContent = endAllNote;
+  $("lease-end-all-note").hidden = !endAllNote;
+  $("lease-end-all").setAttribute("aria-label", endAllNote ? `End all. ${endAllNote}` : "End all");
   $("lease-count").textContent = isFolder ? plural(byAgent.size, "agent") : `${byAgent.size} of ${MAX_LEASES_PER_SECRET}${covered.length ? ` · ${covered.length} YOLO` : ""}`;
   const rows = [...byAgent.values()].sort((a, b) => Math.min(...a.leases.map((l) => l.expires)) - Math.min(...b.leases.map((l) => l.expires)));
   $("lease-rows").replaceChildren(...rows.map((r) => leaseRow(granteeName(r.to), r.leases, (btn) => endLeases(r.names, r.to, btn))), ...covered.map(yoloAccessRow), ...(yoloError ? [el("p", { class: "form-error", role: "alert", textContent: yoloError })] : []));
@@ -1323,7 +1333,7 @@ function renderActivityInto(rows, events, showSecret, onSecret = null) {
     const toggle = el("button", { type: "button", class: "ev-toggle", textContent: `${label}${via}`, "aria-expanded": "false", "aria-controls": moreId });
     const what = el("div", { class: "ev-main" },
       el("div", { class: `ev ${ev.ok ? "" : "denied"}` }, el("span", { class: "dot" }), toggle, secretEl),
-      summary ? el("code", { class: "ev-cmd", textContent: summary, title: ev.action === "lease" && ev.detail?.expires ? `${summary}\nEnds ${fullTime(ev.detail.expires)}` : summary }) : null,
+      summary ? el("code", { class: "ev-cmd", textContent: summary, title: ev.action === "lease" && ev.detail?.expires ? `${summary}\n${endsAt(ev.detail.expires)}` : summary }) : null,
       ev.ok ? null : el("span", { class: "err", textContent: ev.err || "denied" }),
       where ? el("span", { class: "cwd", textContent: where, title: "Working directory and git branch" }) : null);
 
@@ -3406,7 +3416,8 @@ $("audit-secret").addEventListener("keydown", (e) => {
 $("lease-grant").addEventListener("click", grantLease);
 $("leases-end-all").addEventListener("click", async () => {
   const n = secrets.filter((s) => leasesOf(s).length).length + Object.keys(yolos).filter((p) => folderYolos(p).length).length;
-  if (!(await confirmDialog("End all temporary access?", yoloError ? "YOLO status is unknown. End all temporary access, including any YOLO folders, now?" : `Temporary access to ${n} ${n === 1 ? "item" : "items"}, including any YOLO folders, ends now. Each one's access level applies again: Touch ID where it's on, refused where agents are blocked.`, "End all"))) return;
+  const endAllNote = endAllYoloNote(Object.keys(yolos).flatMap(folderYolos));
+  if (!(await confirmDialog("End all temporary access?", yoloError ? "YOLO status is unknown. End all temporary access, including any YOLO folders, now?" : [`Temporary access to ${n} ${n === 1 ? "item" : "items"}, including any YOLO folders, ends now. Each one's access level applies again: Touch ID where it's on, refused where agents are blocked.`, endAllNote].filter(Boolean).join(" "), "End all"))) return;
   try {
     const r = await call("lease_revoke_all", {}, $("leases-end-all"));
     toast(`Ended temporary access to ${r.length} ${r.length === 1 ? "item" : "items"}`);
