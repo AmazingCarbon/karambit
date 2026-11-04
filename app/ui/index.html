@@ -85,6 +85,7 @@
       </div>
       <p id="exposure-state" class="exposure-state small" hidden><span id="exposure-showing"></span> · <button type="button" id="exposure-clear" class="exposure-clear">Clear</button></p>
       <p id="exposure-legend" class="exposure-legend small" hidden></p>
+      <div id="yolo-banner" class="banner bad has-icon yolo-banner" role="status" hidden></div>
       <!-- Alerts, most severe first: AWS signed out (agents broken), screen-lock key, backup. One line shows; "+N more" expands. -->
       <div id="alerts" class="alerts-collapsed">
         <div id="block-banner" class="banner bad has-icon" role="status" hidden></div>
@@ -536,6 +537,26 @@
     <label class="lbl" for="move-name">New folder path</label><input id="move-name" required spellcheck="false" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]*(/[A-Za-z0-9_\-][A-Za-z0-9._\-]*)*" autocomplete="off">
     <p id="move-error" class="form-error" role="alert"></p>
     <div class="actions"><button type="button" class="btn" id="move-cancel">Cancel</button><button class="btn primary" type="submit" id="move-submit">Move</button></div></form>
+  </dialog>
+  <dialog id="yolo-dialog" class="wide" aria-labelledby="yolo-title">
+    <form id="yolo-form" method="dialog">
+      <h2 id="yolo-title" class="mono-title"></h2>
+      <p id="yolo-sub" class="muted small"></p>
+      <div class="banner bad has-icon" id="yolo-warn">
+        <svg class="banner-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 1 0 0-13z"/><path d="M8 7.3v4"/><path d="M8 4.9v.01"/></svg>
+        <span id="yolo-warn-text"></span>
+      </div>
+      <div class="lease-controls lease-sentence">
+        <span class="lease-pair"><span>Let</span><label class="sr-only" for="yolo-to">Agent</label><select id="yolo-to"></select></span>
+        <span class="lease-pair"><span>use everything in</span><strong id="yolo-path" class="mono"></strong></span>
+        <span class="lease-pair"><span>for</span><label class="sr-only" for="yolo-hours">Duration</label><select id="yolo-hours">
+          <option value="1">1 hour</option><option value="6" selected>6 hours</option><option value="24">24 hours</option><option value="72">3 days</option><option value="168">7 days (most)</option>
+        </select></span>
+      </div>
+      <table class="yolo-table" id="yolo-table"><thead><tr><th>Key</th><th>Level</th><th>During YOLO</th></tr></thead><tbody></tbody></table>
+      <p class="hint">Ends at its end time, when you click End, when you block agents, or when the Karambit daemon restarts. Never makes a key public and never turns redaction off. Agent access does not end on screen lock.</p>
+      <div class="actions"><span class="muted small">Touch ID is asked once to confirm.</span><button type="button" class="btn" id="yolo-cancel">Cancel</button><button type="button" class="btn danger" id="yolo-start">Start YOLO</button></div>
+    </form>
   </dialog>
   <dialog id="palette-dialog" aria-labelledby="palette-title"><h2 id="palette-title" class="sr-only">Find anything</h2>
     <label class="sr-only" for="palette-query">Search folders, secrets and sources</label><input id="palette-query" role="combobox" aria-controls="palette-results" aria-expanded="true" aria-autocomplete="list" type="search" placeholder="Find a folder, secret or source" autocomplete="off">

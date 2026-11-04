@@ -1242,3 +1242,21 @@ mark.hit { background: var(--accent-soft); color: var(--accent-text); border-rad
 .aws-tree-body .secret-row + .secret-row { border-top: 1px solid var(--line); }
 .aws-tree > summary::before { content: ''; width: 7px; height: 7px; margin: 0 4px 0 2px; border-right: 2px solid var(--fg-2); border-bottom: 2px solid var(--fg-2); transform: rotate(-45deg); }
 .aws-tree[open] > summary::before { transform: rotate(45deg); }
+
+/* ---------- folder YOLO ---------- */
+.tag.yolo { color: var(--bad); background: var(--bad-soft); }
+.tag-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.row-added { color: var(--fg-2); font-size: 12px; }
+.yolo-banner { display: flex; flex-direction: column; gap: 12px; }
+.yolo-banner-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; width: 100%; }
+.yolo-banner.has-icon { padding-left: 14px; }
+.yolo-banner .banner-icon { position: static; flex: none; align-self: flex-start; margin-top: 2px; }
+.yolo-banner .yb-text { flex: 1 1 240px; min-width: 0; }
+.yolo-banner .yb-text small { display: block; font-weight: 400; opacity: .9; }
+.yolo-table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+.yolo-table th { text-align: left; font-weight: 500; color: var(--fg-2); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.yolo-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.yolo-table td.mono { font-family: var(--font-mono); }
+.yolo-table td.warn-cell { color: var(--bad); }
+.yolo-table td.dim { color: var(--fg-2); }
+@media (max-width: 900px) { .yolo-table th:nth-child(2), .yolo-table td:nth-child(2) { display: none; } }
