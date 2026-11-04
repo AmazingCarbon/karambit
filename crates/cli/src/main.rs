@@ -1307,10 +1307,10 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
         }
         Cmd::Status => {
             let mut st = v.status()?;
-            st["yolos"] = json!(v.yolos());
+            st["yolos"] = json!(v.yolos()?);
             if cli.json { print_json(&st) } else {
                 print_status(&st);
-                for y in v.yolos() { println!("YOLO: {}/ · {} · {} left", y.path, y.to_label, dur(y.remaining)); }
+                for y in v.yolos()? { println!("YOLO: {}/ · {} · {} left", y.path, y.to_label, dur(y.remaining)); }
             }
         }
         Cmd::Add { name, access, touch, human_only, public, force } => {
@@ -1452,7 +1452,7 @@ fn dispatch(cli: Cli, mut v: Karambit) -> Result<ExitCode> {
             println!("YOLO ended for {folder}/");
         }
         Cmd::Yolo { cmd: YoloCmd::List } => {
-            let ys = v.yolos();
+            let ys = v.yolos()?;
             if cli.json { print_json(&json!(ys)); }
             else if ys.is_empty() { println!("no active YOLO access"); }
             else { for y in ys { println!("{}/  YOLO  {}  {} left", y.path, y.to_label, dur(y.remaining)); } }

@@ -23,6 +23,13 @@ All notable changes to Karambit are listed here. The format follows
   ends one; without `--to` it ends all. The app lists each temporary access with its own End button.
 - App: an Edit button for secrets (name, value and access) and "Rename or move" in the folder menu.
 
+### Fixed
+
+- App End all temporary access now ends per-key access and YOLO records together in the daemon.
+  Failed YOLO queries report an error or unknown state instead of hiding active access.
+- Key inspectors and secret details show covering YOLO records with scoped End buttons and active
+  override explanations, while keeping the stored access level visible.
+
 ### Changed
 
 - Granting a lease to one agent no longer replaces another agent's lease on the same secret.

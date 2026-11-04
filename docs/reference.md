@@ -209,6 +209,11 @@ YOLO does not apply to `aws/` or `sources/`.
   **Agent access does not end on screen lock.** Ending YOLO leaves per-key accesses alone.
 - The app shows one banner line and End button per active folder and grantee. The folder-menu
   **End YOLO** ends all YOLO records on that folder; its row tag shows the soonest end.
+  The key inspector and secret details show every verified covering YOLO, its folder, grantee and end
+  time, alongside the stored access level. Their End buttons end only that folder and grantee.
+  **End all temporary access** ends both per-key access and matching whole-folder YOLO records in
+  one daemon operation. Ending all for a key also ends its ancestor-folder YOLOs, including their
+  authority to cover future keys. Failed access queries show an error or unknown state, not no access.
   Status and `lease ls` include one YOLO row per record. `status --json` also includes `yolos`.
 - Audit events `yolo-start`, `yolo-end`, `yolo-expired` and `yolo-used` name the folder and grantee.
   The app uses the words “temporary access”, not “lease”.

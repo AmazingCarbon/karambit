@@ -773,9 +773,15 @@ impl Karambit {
         Ok(())
     }
 
-    pub fn yolos(&self) -> Vec<daemon::YoloView> {
-        daemon::request_if_running(&self.paths, &daemon::Req::YoloList)
-            .and_then(|r| serde_json::from_value(r["yolos"].clone()).ok()).unwrap_or_default()
+    pub fn yolos(&self) -> Result<Vec<daemon::YoloView>> {
+        let r = daemon::request(&self.paths, &daemon::Req::YoloList)?;
+        Ok(serde_json::from_value(r["yolos"].clone())?)
+    }
+
+    /// End matching per-key and whole-folder temporary authority in one daemon operation.
+    pub fn end_temporary_access(&self, patterns: &[String]) -> Result<Vec<String>> {
+        let r = daemon::request(&self.paths, &daemon::Req::EndTemporaryAccess { patterns: patterns.to_vec() })?;
+        Ok(serde_json::from_value(r["revoked"].clone())?)
     }
 
     /// End leases early. Agents may revoke (it only tightens); never prompts.

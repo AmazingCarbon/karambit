@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const source = fs.readFileSync(require.resolve("../ui/app.js"), "utf8");
 function ui(yolos) {
-  const context = vm.createContext({ yolos, Date, el: (tag, attrs) => ({ tag, ...attrs }), fullTime: String });
+  const context = vm.createContext({ yolos, yoloError: "", Date, el: (tag, attrs) => ({ tag, ...attrs }), fullTime: String });
   vm.runInContext(source.slice(source.indexOf("const folderYolos ="), source.indexOf("function renderYoloBanner()")), context);
   return (expression) => vm.runInContext(expression, context);
 }
@@ -37,4 +37,90 @@ test("the shipped document does not load the prototype backend", () => {
   const html = fs.readFileSync(require.resolve("../ui/index.html"), "utf8");
   assert.doesNotMatch(html, /mock-tauri/);
   assert.match(html, /Agent access does not end on screen lock\./);
+});
+
+// Exercise the inspector's actual row renderer and End callbacks without shipping a mock backend.
+function inspector(yolos, extra = {}) {
+  const requests = [];
+  let refreshes = 0;
+  const context = vm.createContext({
+    yolos, yoloError: "", Date,
+    el: (tag, attrs = {}, ...children) => ({ tag, ...attrs, children }),
+    fullTime: (ts) => `time:${ts}`, endsAt: (ts) => `ends time:${ts}`,
+    granteeName: (to) => to.value || "Any agent",
+    durShort: () => "1h", scopeLabel: () => "", leasesOf: (s) => s.leases || [],
+    call: async (command, args) => { requests.push({ command, args }); },
+    loadSecrets: async () => { refreshes++; },
+    endYolo: async (path, ctl, to) => { requests.push({ command: "yolo_end", args: { path, to } }); refreshes++; },
+    ...extra,
+  });
+  vm.runInContext(source.slice(source.indexOf("const folderYolos ="), source.indexOf("function renderYoloBanner()")), context);
+  vm.runInContext(source.slice(source.indexOf("function inspectorTemporaryAccess("), source.indexOf("function renderInspector()")), context);
+  return { run: (expr) => vm.runInContext(expr, context), requests, refreshes: () => refreshes };
+}
+const treeText = (node) => typeof node === "string" ? node : [node.textContent || "", ...(node.children || []).map(treeText)].join(" ");
+const yoloRecord = () => access({ path: "stripe", to: { type: "kind", value: "claude" } });
+test("renderInspector YOLO-only rows name folder, agent, end time and scoped End", async () => {
+  const fixture = inspector({ stripe: [yoloRecord()] });
+  const rows = fixture.run('inspectorTemporaryAccess({ name: "stripe/key" })');
+  assert.equal(rows.length, 1);
+  assert.match(treeText(rows[0]), /YOLO.*stripe\/ · claude.*No prompt · ends time:/);
+  assert.doesNotMatch(treeText(rows[0]), /No temporary access/);
+  const end = rows[0].children[1];
+  assert.equal(end["aria-label"], "End YOLO for claude to stripe/");
+  await end.onclick();
+  assert.equal(JSON.stringify(fixture.requests), JSON.stringify([{ command: "yolo_end", args: { path: "stripe", to: { type: "kind", value: "claude" } } }]));
+  assert.equal(fixture.refreshes(), 1);
+  assert.match(fixture.run('yoloOverride({ name: "stripe/key" })'), /YOLO on stripe\/ · claude: no prompt until time:/);
+});
+test("renderInspector mixed rows retain YOLO after ending per-key access", async () => {
+  const fixture = inspector({ stripe: [yoloRecord()] });
+  const rows = fixture.run(`inspectorTemporaryAccess({ name: "stripe/key", leases: [{ to: { type: "kind", value: "pi" }, remaining: 3600 }] })`);
+  assert.equal(rows.length, 2);
+  const end = rows[0].children[1];
+  assert.equal(end["aria-label"], "End temporary access for pi to stripe/key");
+  await end.onclick();
+  assert.equal(fixture.requests[0].command, "lease_revoke");
+  assert.equal(fixture.refreshes(), 1);
+  const after = fixture.run('inspectorTemporaryAccess({ name: "stripe/key", leases: [] })');
+  assert.match(treeText(after[0]), /YOLO.*stripe\/ · claude/);
+  assert.doesNotMatch(after.map(treeText).join(" "), /No temporary access/);
+});
+test("renderInspector ignores expired, unverified and Public YOLO coverage", () => {
+  const fixture = inspector({ stripe: [yoloRecord(), access({ path: "stripe", expires: now - 1 }), access({ path: "stripe", covered: [] })] });
+  assert.equal(fixture.run('inspectorTemporaryAccess({ name: "stripe/key" }).length'), 1);
+  assert.equal(fixture.run('yolosFor({ name: "stripe/key", public: true }).length'), 0);
+  assert.match(treeText(fixture.run('inspectorTemporaryAccess({ name: "stripe/missing" })')[0]), /No temporary access/);
+});
+test("failed YOLO listing shows unknown, never an empty-access claim", async () => {
+  const fixture = inspector({ stripe: [yoloRecord()] }, { invoke: async () => { throw new Error("offline"); } });
+  await fixture.run("loadYolos()");
+  const rows = fixture.run('inspectorTemporaryAccess({ name: "stripe/key" })');
+  assert.match(treeText(rows[0]), /YOLO status unknown: Error: offline/);
+  assert.equal(rows[0].role, "alert");
+  assert.doesNotMatch(rows.map(treeText).join(" "), /No temporary access/);
+  assert.match(fixture.run('yoloOverride({ name: "stripe/key" })'), /unknown/);
+});
+
+test("renderInspector lists every live verified ancestor and grantee separately", () => {
+  const fixture = inspector({
+    stripe: [yoloRecord(), access({ path: "stripe", to: { type: "kind", value: "pi" } })],
+    "stripe/sub": [access({ path: "stripe/sub", to: { type: "any" }, covered: ["stripe/key"] })],
+  });
+  const rows = fixture.run('inspectorTemporaryAccess({ name: "stripe/key" })');
+  assert.equal(rows.length, 3);
+  assert.deepEqual(Array.from(rows, row => row.children[1]["aria-label"]).sort(), [
+    "End YOLO for Any agent to stripe/sub/", "End YOLO for claude to stripe/", "End YOLO for pi to stripe/",
+  ]);
+});
+test("loadStatusPage replaces stale access rows with an unknown state on failure", async () => {
+  const nodes = new Map();
+  const fixture = inspector({}, {
+    $: (id) => { if (!nodes.has(id)) nodes.set(id, { replaceChildren(...children) { this.children = children; } }); return nodes.get(id); },
+    call: async () => { throw new Error("offline"); }, refreshSso: async () => {},
+  });
+  fixture.run(source.slice(source.indexOf("async function loadStatusPage()"), source.indexOf("function renderLeases(")));
+  await fixture.run("loadStatusPage()");
+  assert.equal(nodes.get("status-leases-count").textContent, "Unknown");
+  assert.match(treeText(nodes.get("status-leases").children[0]), /Temporary access status unknown/);
 });

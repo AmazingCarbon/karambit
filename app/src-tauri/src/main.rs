@@ -105,13 +105,12 @@ async fn agents_discover() -> R<Value> {
 async fn status_full() -> R<Value> {
     let v = karambit()?;
     let status = v.status().unwrap_or_else(|err| json!({"error": format!("{err:#}")}));
-    let daemon = karambit_core::daemon::request_if_running(&v.paths, &karambit_core::daemon::Req::List);
+    let daemon = karambit_core::daemon::request(&v.paths, &karambit_core::daemon::Req::List).map_err(e)?;
     let pins = |f: &str| std::fs::read_to_string(v.paths.keys().join(f)).map(|t| t.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0);
     Ok(json!({
         "status": status,
-        "daemon": daemon.as_ref().map(|d| json!({"running": true, "leases": d["leases"].as_array().map_or(0, |a| a.len()), "aws_endpoints": d["aws_endpoints"]}))
-            .unwrap_or(json!({"running": false})),
-        "leases": v.leases(),
+        "daemon": {"running": true, "leases": daemon["leases"].as_array().map_or(0, |a| a.len()), "aws_endpoints": daemon["aws_endpoints"]},
+        "leases": daemon["leases"],
         "killed": v.cfg.killed,
         "pins": {"daemon": pins("daemon.sha256"), "helper": pins("helper.sha256")},
     }))
@@ -553,7 +552,7 @@ async fn yolo_end(path: String, to: Option<karambit_core::lease::Grantee>) -> R<
 #[tauri::command]
 async fn yolo_list() -> R<Value> {
     let mut folders: std::collections::BTreeMap<String, Vec<karambit_core::daemon::YoloView>> = Default::default();
-    for y in karambit()?.yolos() { folders.entry(y.path.clone()).or_default().push(y); }
+    for y in karambit()?.yolos().map_err(e)? { folders.entry(y.path.clone()).or_default().push(y); }
     Ok(json!(folders))
 }
 
@@ -570,16 +569,16 @@ async fn lease_grant(names: Vec<String>, to: String, hours: f64, cwd: Option<Str
 
 #[tauri::command]
 async fn lease_revoke_all() -> R<Value> {
-    let v = karambit()?;
-    let mut ended = v.revoke_lease(&["*".to_string()]).map_err(e)?;
-    let folders: std::collections::BTreeSet<_> = v.yolos().into_iter().map(|y| y.path).collect();
-    for path in folders { v.yolo_end(&path, None).map_err(e)?; ended.push(format!("{path}/")); }
-    Ok(json!(ended))
+    Ok(json!(karambit()?.end_temporary_access(&["*".to_string()]).map_err(e)?))
 }
 
 #[tauri::command]
 async fn lease_revoke(names: Vec<String>, to: Option<karambit_core::lease::Grantee>) -> R<Value> {
-    Ok(json!(karambit()?.revoke_lease_for(&names, to.as_ref()).map_err(e)?))
+    let v = karambit()?;
+    Ok(json!(match to {
+        Some(to) => v.revoke_lease_for(&names, Some(&to)),
+        None => v.end_temporary_access(&names),
+    }.map_err(e)?))
 }
 
 /// Recent audit events for one secret, newest first.

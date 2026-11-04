@@ -194,7 +194,7 @@ pub(crate) fn request_verb(req: &Req) -> Option<Verb> {
         | Req::Unlock { .. } | Req::Copy { .. } | Req::Use { .. } | Req::LaunchPrepare { .. }
         | Req::LaunchCancel { .. } | Req::LaunchRedaction { .. } | Req::LaunchBind { .. }
         | Req::LaunchRedeem { .. } | Req::Revoke { .. } | Req::List | Req::AwsOpen { .. }
-        | Req::YoloEnd { .. } | Req::YoloList | Req::YoloEnroll { .. } | Req::YoloForget { .. }
+        | Req::EndTemporaryAccess { .. } | Req::YoloEnd { .. } | Req::YoloList | Req::YoloEnroll { .. } | Req::YoloForget { .. }
         | Req::AwsClose { .. } | Req::SsoForget { .. } | Req::SsoStatus | Req::SsoOpen { .. } => None,
     }
 }
