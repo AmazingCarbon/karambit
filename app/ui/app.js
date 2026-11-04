@@ -164,6 +164,14 @@ function confirmDialog(title, msg, okLabel = "Delete", danger = true, noLabel = 
 
 let currentView = "secrets";
 
+// Replay an entrance animation on a node that stays in the DOM (it is re-filled, not re-created).
+function playIn(node, cls = "motion-in") {
+  node.classList.remove(cls);
+  void node.offsetWidth;
+  node.classList.add(cls);
+  node.addEventListener("animationend", () => node.classList.remove(cls), { once: true });
+}
+
 function show(view) {
   if (view === "sources" && !sourceKinds.length) view = "secrets";
   currentView = view;
@@ -666,6 +674,7 @@ function navigateFolder(path = "", source = null) {
   currentFolder = path;
   selectedSecret = null;
   renderSecrets();
+  playIn($("rows"));
   renderYoloBanner();
   renderInspector();
   $("folder-title").focus();
@@ -1116,6 +1125,7 @@ async function openFolderDetail(path) { detail = { kind: "folder", name: path };
 
 async function showDetail() {
   const dlg = $("detail-dialog");
+  seenLeases = { scope: "", keys: new Set() };
   $("lease-cwd").value = "";
   $("lease-cmds").value = "";
   $("lease-uses").value = "";
@@ -1204,8 +1214,15 @@ function renderLeaseRows(leasable, isFolder) {
   $("lease-end-all").setAttribute("aria-label", endAllNote ? `End all. ${endAllNote}` : "End all");
   $("lease-count").textContent = isFolder ? plural(byAgent.size, "agent") : `${byAgent.size} of ${MAX_LEASES_PER_SECRET}${covered.length ? ` · ${covered.length} YOLO` : ""}`;
   const rows = [...byAgent.values()].sort((a, b) => Math.min(...a.leases.map((l) => l.expires)) - Math.min(...b.leases.map((l) => l.expires)));
-  $("lease-rows").replaceChildren(...rows.map((r) => leaseRow(granteeName(r.to), r.leases, (btn) => endLeases(r.names, r.to, btn))), ...covered.map(yoloAccessRow), ...(yoloError ? [el("p", { class: "form-error", role: "alert", textContent: yoloError })] : []));
+  const nodes = [...rows.map((r) => leaseRow(granteeName(r.to), r.leases, (btn) => endLeases(r.names, r.to, btn))), ...covered.map(yoloAccessRow)];
+  const scope = `${detail.kind}:${detail.name}`;
+  const keys = [...rows.map((r) => granteeValue(r.to)), ...covered.map((y) => `folder:${y.path}:${granteeValue(y.to)}`)];
+  if (seenLeases.scope === scope) nodes.forEach((n, i) => { if (!seenLeases.keys.has(keys[i])) n.classList.add("row-in"); });
+  seenLeases = { scope, keys: new Set(keys) };
+  $("lease-rows").replaceChildren(...nodes, ...(yoloError ? [el("p", { class: "form-error", role: "alert", textContent: yoloError })] : []));
 }
+
+let seenLeases = { scope: "", keys: new Set() };
 
 // Button and help for the agent chosen in the select: replace its access, add a separate one,
 // or stop when the secret already has the most. Other agents' access is never touched.
@@ -3101,9 +3118,11 @@ function renderInspector() {
   const aws = $("aws-detail");
   if (panel.contains(aws)) $("detail-dialog").querySelector("form").prepend(aws);
   const s = secrets.find((x) => x.name === selectedSecret);
+  const wasHidden = panel.hidden;
   panel.hidden = !s;
   panel.replaceChildren();
   if (!s) { renderAwsDetail(null); return; }
+  if (wasHidden) playIn(panel, "slide-in");
   const close = el("button", { class: "ibtn", "aria-label": "Close details", onclick: () => { selectedSecret = null; renderLists(); renderInspector(); } }, icon(ICON_CLOSE));
   const slash = s.name.lastIndexOf("/");
   panel.append(el("div", { class: "panel-heading" }, el("h2", { class: "mono-title panel-name" },

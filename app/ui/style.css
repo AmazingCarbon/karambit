@@ -379,11 +379,16 @@ dialog {
   border: 0; border-radius: 12px; padding: var(--s5); width: 460px; max-height: 88vh; overflow: auto;
   color: var(--fg); background: var(--surface); box-shadow: var(--shadow-pop);
 }
-dialog[open] { animation: pop var(--t) var(--ease); }
-@keyframes pop { from { transform: translateY(6px); } }
+/* Motion: dialogs fade and rise on open and sink on close. Closing keeps the dialog on screen until the
+   transition ends (display and overlay are discrete). Browsers without this just open and close at once. */
+dialog { opacity: 0; transform: translateY(6px); transition: opacity var(--t) var(--ease), transform var(--t) var(--ease), overlay var(--t) allow-discrete, display var(--t) allow-discrete; }
+dialog[open] { opacity: 1; transform: none; }
+@starting-style { dialog[open] { opacity: 0; transform: translateY(6px); } }
 dialog.small { width: 380px; }
 dialog.wide { width: 640px; }
-dialog::backdrop { background: var(--scrim); }
+dialog::backdrop { background: var(--scrim); opacity: 0; transition: opacity var(--t) var(--ease), overlay var(--t) allow-discrete, display var(--t) allow-discrete; }
+dialog[open]::backdrop { opacity: 1; }
+@starting-style { dialog[open]::backdrop { opacity: 0; } }
 dialog h2 { margin-bottom: var(--s1); }
 dialog .lbl:first-of-type { margin-top: var(--s4); }
 .opts { margin-top: var(--s4); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
@@ -1284,3 +1289,12 @@ mark.hit { background: var(--accent-soft); color: var(--accent-text); border-rad
   #view-secrets .secrets-body:has(.inspector:not([hidden])) .secret-row .level-badge { margin-left: 0; font-size: 12px; padding: 5px 9px; gap: 6px; }
   #view-secrets .inspector { box-shadow: var(--shadow-pop); z-index: 6; }
 }
+
+/* ---------- motion (design) ----------
+   Every duration is var(--t) or var(--t-fast), which the reduced-motion rule at the top sets to 0ms. */
+@keyframes view-in { from { opacity: 0; transform: translateY(4px); } }
+@keyframes slide-in { from { opacity: 0; transform: translateX(14px); } }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
+main > section:not([hidden]), .motion-in, .banner:not([hidden]), .lrow.row-in { animation: view-in var(--t) var(--ease); }
+.inspector.slide-in { animation: slide-in var(--t) var(--ease); }
+.folder-menu[open] .menu-actions, .more-menu[open] .more-popover { animation: menu-in var(--t-fast) var(--ease); transform-origin: top right; }
