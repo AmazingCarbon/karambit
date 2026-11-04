@@ -4,7 +4,7 @@
 
 <h1 align="center">Karambit</h1>
 
-<p align="center"><strong>Your agent shouldn't eat your secrets. Karambit eats them first.</strong></p>
+<p align="center"><strong>Hassle-free secret manager for you and your agents.</strong></p>
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
