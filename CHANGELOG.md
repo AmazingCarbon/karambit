@@ -26,6 +26,8 @@ All notable changes to Karambit are listed here. The format follows
 ### Fixed
 
 - App End all temporary access now ends per-key access and YOLO records together in the daemon.
+  Its warning includes ancestor YOLOs even when the selected key is not covered. Exact key names
+  no longer select same-named folders. Background refresh keeps access dialog drafts unchanged.
   Failed YOLO queries report an error or unknown state instead of hiding active access.
 - Key inspectors and secret details show covering YOLO records with scoped End buttons and active
   override explanations, while keeping the stored access level visible.

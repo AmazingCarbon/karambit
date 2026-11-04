@@ -543,8 +543,14 @@ function yoloOverride(s) {
   if (yoloError) return yoloError;
   return yolosFor(s).map((y) => `YOLO on ${y.path}/ · ${granteeName(y.to)}: no prompt · ${endsAt(y.expires)}`).join("; ");
 }
-function endAllYoloNote(covered) {
-  const paths = [...new Set(covered.map((y) => y.path))].sort();
+// Revocation ends whole ancestor records even when the selected keys are not covered.
+function endAllYolosFor(patterns) {
+  return Object.keys(yolos).flatMap(folderYolos).filter((y) => patterns.some((pt) =>
+    pt === "*" || pt.startsWith(`${y.path}/`) || (pt.endsWith("/") && `${y.path}/`.startsWith(pt))));
+}
+function endAllYoloNote(records) {
+  if (yoloError) return "Folder YOLO scope is unknown. End all also ends any matching folder YOLO for every key in those folders.";
+  const paths = [...new Set(records.map((y) => y.path))].sort();
   return paths.length ? `End all also ends YOLO on ${paths.map((p) => `${p}/`).join(", ")} for every key in ${paths.length === 1 ? "that folder" : "those folders"}.` : "";
 }
 function yoloAccessRow(y) {
@@ -1116,7 +1122,7 @@ async function showDetail() {
   $("lease-hours").value = "2";
   $("lease-to").replaceChildren(el("option", { value: "claude", textContent: "claude · any session" }));
   if (!dlg.open) openDialog(dlg);
-  await renderDetail();
+  await renderDetail({ initializeGrantees: true });
 }
 
 function detailTargets() {
@@ -1124,6 +1130,12 @@ function detailTargets() {
   return detail.kind === "secret"
     ? secrets.filter((s) => s.name === detail.name)
     : secrets.filter((s) => s.name.startsWith(detail.name + "/"));
+}
+
+function detailEndPatterns() {
+  const names = detailTargets().filter((s) => !s.public).map((s) => s.name);
+  if (detail?.kind === "folder") names.push(detail.name + "/");
+  return names;
 }
 
 // One secret holds at most this many temporary accesses (one per agent); the daemon enforces it.
@@ -1183,9 +1195,10 @@ function renderLeaseRows(leasable, isFolder) {
     }
   }
   const covered = [...new Map(leasable.flatMap(yolosFor).map((y) => [JSON.stringify([y.path, y.to]), y])).values()];
-  $("lease-active").hidden = byAgent.size === 0 && !covered.length && !yoloError;
-  $("lease-end-all").hidden = byAgent.size === 0 && !covered.length && !yoloError;
-  const endAllNote = endAllYoloNote(covered);
+  const affected = endAllYolosFor(detailEndPatterns());
+  $("lease-active").hidden = byAgent.size === 0 && !affected.length && !yoloError;
+  $("lease-end-all").hidden = byAgent.size === 0 && !affected.length && !yoloError;
+  const endAllNote = endAllYoloNote(affected);
   $("lease-end-all-note").textContent = endAllNote;
   $("lease-end-all-note").hidden = !endAllNote;
   $("lease-end-all").setAttribute("aria-label", endAllNote ? `End all. ${endAllNote}` : "End all");
@@ -1210,7 +1223,7 @@ function syncLeaseControls() {
   const others = [...new Set(leasable.flatMap((s) => leasesOf(s)).filter((l) => granteeValue(l.to) !== key).map((l) => granteeName(l.to)))];
   const keep = others.length ? ` ${joinNames(others)} ${others.length > 1 ? "keep" : "keeps"} theirs.` : "";
   const grant = $("lease-grant");
-  grant.disabled = full;
+  grant.disabled = full || !$("lease-to").value;
   grant.textContent = haveIt.length ? (isFolder ? `Replace ${name}'s access on all ${leasable.length}` : `Replace ${name}'s access`)
     : isFolder ? `Give access to all ${leasable.length}` : "Give access";
   let help;
@@ -1238,7 +1251,7 @@ function syncLeaseControls() {
   $("lease-touch-note").textContent = "Touch ID is asked once to confirm. ";
 }
 
-async function renderDetail() {
+async function renderDetail({ initializeGrantees = false } = {}) {
   const d = detail;
   if (!d) return;
   const items = detailTargets();
@@ -1284,22 +1297,29 @@ async function renderDetail() {
   } catch { /* toast shown */ }
   if (detail !== d) return;
 
-  // Offer the recent agent sessions as lease targets ("only this session").
-  const sessions = new Map();
-  for (const ev of events) if (ev.session && ev.kind && !sessions.has(ev.session)) sessions.set(ev.session, ev);
-  const to = $("lease-to");
-  const base = ["pi", "claude", "codex", "kiro", "cursor"];
-  // Agents that already hold access are offered too, so their access can be replaced.
-  const holders = items.flatMap((s) => leasesOf(s)).filter((l) => l.to.type === "kind").map((l) => l.to.value);
-  const kinds = [...new Set([...events.filter((e) => e.kind).map((e) => e.kind), ...holders])].filter((k) => !base.includes(k));
-  const typeOpts = [["any", "Any agent"], ...base.concat(kinds).map((k) => [k, `Any ${k} agent`])];
-  const sessOpts = [...sessions.values()].slice(0, 6).map((e) => [`session:${e.session}`, `Only ${e.kind} ${whoLabel(e).sess} (${e.cwd ? e.cwd.split("/").slice(-1)[0] + ", " : ""}${relTime(e.ts)})`]);
-  const opts = [...typeOpts, ...sessOpts];
-  const prev = to.value;
-  const optGroup = (label, list) => el("optgroup", { label }, ...list.map(([v, l]) => el("option", { value: v, textContent: l })));
-  to.replaceChildren(optGroup("Agent type", typeOpts), ...(sessOpts.length ? [optGroup("Recent sessions", sessOpts)] : []));
-  if (opts.some(([v]) => v === prev)) to.value = prev;
-  syncLeaseControls();
+  // Refresh access state and activity without changing any editable draft controls.
+  if (initializeGrantees) {
+    // Offer the recent agent sessions as lease targets ("only this session").
+    const sessions = new Map();
+    for (const ev of events) if (ev.session && ev.kind && !sessions.has(ev.session)) sessions.set(ev.session, ev);
+    const to = $("lease-to");
+    const base = ["pi", "claude", "codex", "kiro", "cursor"];
+    // Agents that already hold access are offered too, so their access can be replaced.
+    const holders = items.flatMap((s) => leasesOf(s)).filter((l) => l.to.type === "kind").map((l) => l.to.value);
+    const kinds = [...new Set([...events.filter((e) => e.kind).map((e) => e.kind), ...holders])].filter((k) => !base.includes(k));
+    const typeOpts = [["any", "Any agent"], ...base.concat(kinds).map((k) => [k, `Any ${k} agent`])];
+    const sessOpts = [...sessions.values()].slice(0, 6).map((e) => [`session:${e.session}`, `Only ${e.kind} ${whoLabel(e).sess} (${e.cwd ? e.cwd.split("/").slice(-1)[0] + ", " : ""}${relTime(e.ts)})`]);
+    const opts = [...typeOpts, ...sessOpts];
+    const prev = to.value;
+    const previousLabel = to.selectedOptions[0]?.textContent || prev;
+    const optGroup = (label, list) => el("optgroup", { label }, ...list.map(([v, l]) => el("option", { value: v, textContent: l })));
+    to.replaceChildren(optGroup("Agent type", typeOpts), ...(sessOpts.length ? [optGroup("Recent sessions", sessOpts)] : []));
+    if (prev && !opts.some(([v]) => v === prev)) {
+      to.append(optGroup("Selected agent", [[prev, previousLabel]]));
+    }
+    to.value = prev;
+    syncLeaseControls();
+  }
 
   renderActivity(events, isFolder);
 }
@@ -1317,7 +1337,7 @@ function renderActivityInto(rows, events, showSecret, onSecret = null) {
   for (const ev of events) {
     const who = whoLabel(ev);
     const label = actionLabel(ev);
-    const via = ev.detail && Array.isArray(ev.detail.via_lease) ? " via lease" : "";
+    const via = ev.detail && Array.isArray(ev.detail.via_lease) ? " via temporary access" : "";
     const summary = eventSummary(ev);
     const where = [ev.cwd, ev.branch && `\u2387 ${ev.branch}`].filter(Boolean).join("  ");
     const names = ev.secrets || [];
@@ -1363,6 +1383,7 @@ async function grantLease() {
   if (!$("lease-uses").reportValidity()) return;
   const hours = Number($("lease-hours").value);
   const to = $("lease-to").value;
+  if (!to) return;
   const names = detailTargets().filter((s) => !s.public).map((s) => s.name);
   const cwd = $("lease-cwd").value.trim() || null;
   const cmds = $("lease-cmds").value.split(",").map((x) => x.trim()).filter(Boolean);
@@ -3400,7 +3421,7 @@ async function refreshRuntimeAccess() {
   await loadYolos();
   renderYoloBanner();
   renderInspector();
-  if ($("detail-dialog").open) renderDetail();
+  if ($("detail-dialog").open) await renderDetail();
   if (!$("view-secrets").hidden && !$("rows").contains(document.activeElement)) renderSecrets();
 }
 window.addEventListener("focus", () => { if ($("view-init").hidden) refreshRuntimeAccess(); });
@@ -3425,9 +3446,7 @@ $("leases-end-all").addEventListener("click", async () => {
   loadSecrets();
 });
 $("lease-end-all").addEventListener("click", () => {
-  const names = detailTargets().filter((s) => !s.public).map((s) => s.name);
-  if (detail?.kind === "folder") names.push(detail.name + "/");
-  endLeases(names, null, $("lease-end-all"));
+  endLeases(detailEndPatterns(), null, $("lease-end-all"));
 });
 $("lease-to").addEventListener("change", syncLeaseControls);
 $("status-refresh").addEventListener("click", loadStatusPage);

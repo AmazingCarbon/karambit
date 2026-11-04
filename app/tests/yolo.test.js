@@ -58,7 +58,7 @@ function inspector(yolos, extra = {}) {
   vm.runInContext(source.slice(source.indexOf("function inspectorTemporaryAccess("), source.indexOf("function renderInspector()")), context);
   return { run: (expr) => vm.runInContext(expr, context), requests, refreshes: () => refreshes };
 }
-const treeText = (node) => typeof node === "string" ? node : [node.textContent || "", ...(node.children || []).map(treeText)].join(" ");
+const treeText = (node) => !node ? "" : typeof node === "string" ? node : [node.textContent || "", ...(node.children || []).map(treeText)].join(" ");
 const yoloRecord = () => access({ path: "stripe", to: { type: "kind", value: "claude" } });
 test("renderInspector YOLO-only rows name folder, agent, end time and scoped End", async () => {
   const fixture = inspector({ stripe: [yoloRecord()] });
@@ -165,6 +165,16 @@ function endAllFixture(yolos, extra = {}) {
     ...extra,
   });
   fixture.run(source.slice(source.indexOf("function renderLeaseRows("), source.indexOf("// Button and help for the agent chosen")));
+  fixture.run(`
+    let detail = null, secrets = [];
+    ${source.slice(source.indexOf("function detailTargets()"), source.indexOf("// One secret holds at most"))}
+    const renderRows = renderLeaseRows;
+    renderLeaseRows = (items, isFolder) => {
+      secrets = items;
+      detail = { kind: isFolder ? "folder" : "secret", name: isFolder ? "stripe" : items[0]?.name };
+      renderRows(items, isFolder);
+    };
+  `);
   return { ...fixture, nodes };
 }
 
@@ -188,7 +198,7 @@ test("renderLeaseRows warns End all affects every key in each covering YOLO fold
   assert.match(html, /id="lease-end-all-note" class="hint" hidden><\/p>\s*<div class="actions"><button[^>]*id="lease-end-all"/);
 });
 
-test("renderLeaseRows removes the End all warning without live verified coverage", () => {
+test("renderLeaseRows removes the End all warning without an affected live folder", () => {
   const fixture = endAllFixture({ stripe: [yoloRecord()] });
   fixture.run('renderLeaseRows([{ name: "stripe/key" }], false)');
   assert.equal(fixture.nodes.get("lease-end-all-note").textContent, "End all also ends YOLO on stripe/ for every key in that folder.");
@@ -216,4 +226,120 @@ test("global End all confirmation lists every live YOLO folder", async () => {
   await fixture.nodes.get("leases-end-all").click();
   assert.match(confirmations[0][1], /End all also ends YOLO on other\/, stripe\/ for every key in those folders\./);
   assert.equal(fixture.requests.length, 0);
+});
+
+test("End all warns about uncovered ancestor YOLO without adding access rows", () => {
+  const fixture = endAllFixture({ stripe: [access({ path: "stripe", covered: ["stripe/other"], to: { type: "any" } })] });
+  fixture.run('renderLeaseRows([{ name: "stripe/key", leases: [{ to: { type: "kind", value: "pi" }, expires: 1 }] }], false)');
+  assert.equal(fixture.nodes.get("lease-end-all-note").textContent, "End all also ends YOLO on stripe/ for every key in that folder.");
+  assert.equal(fixture.nodes.get("lease-rows").children.length, 1);
+  fixture.run('renderLeaseRows([{ name: "stripe" }], false)');
+  assert.equal(fixture.nodes.get("lease-end-all-note").hidden, true);
+  fixture.run('renderLeaseRows([{ name: "stripe/key" }], true)');
+  assert.equal(fixture.nodes.get("lease-end-all-note").hidden, false);
+  assert.equal(fixture.nodes.get("lease-end-all").hidden, false);
+  assert.deepEqual(Array.from(fixture.run("detailEndPatterns()")), ["stripe/key", "stripe/"]);
+});
+
+test("End all folder matching distinguishes exact keys and includes uncovered ancestors and descendants", () => {
+  const run = ui({
+    stripe: [access({ path: "stripe", covered: [] })],
+    "stripe/sub": [access({ path: "stripe/sub", covered: [] })],
+    stripe2: [access({ path: "stripe2", covered: [] })],
+  });
+  assert.deepEqual(Array.from(run('endAllYolosFor(["stripe"]).map(y => y.path)')), []);
+  assert.deepEqual(Array.from(run('endAllYolosFor(["stripe/sub/key"]).map(y => y.path)')), ["stripe", "stripe/sub"]);
+  assert.deepEqual(Array.from(run('endAllYolosFor(["stripe/"]).map(y => y.path)')), ["stripe", "stripe/sub"]);
+  assert.equal(run('endAllYolosFor(["*"]).length'), 3);
+});
+
+test("End all warns that folder scope is unknown when YOLO listing fails", () => {
+  const fixture = endAllFixture({}, { yoloError: "YOLO status unknown: offline" });
+  fixture.run('renderLeaseRows([{ name: "stripe/key", leases: [{ to: { type: "kind", value: "pi" }, expires: 1 }] }], false)');
+  const note = fixture.nodes.get("lease-end-all-note").textContent;
+  assert.match(note, /Folder YOLO scope is unknown/);
+  assert.match(note, /every key in those folders/);
+  assert.equal(fixture.nodes.get("lease-end-all").attributes["aria-label"], `End all. ${note}`);
+});
+
+// Run the real dialog renderer with draft controls that fail if a refresh rebuilds them.
+function detailRefreshFixture(kind, activity) {
+  const nodes = new Map();
+  const node = (id) => {
+    if (!nodes.has(id)) nodes.set(id, {
+      value: "", hidden: false,
+      replaceChildren() { throw new Error(`Refresh rebuilt ${id}`); },
+    });
+    return nodes.get(id);
+  };
+  const context = vm.createContext({
+    $: node, document: { querySelector: node },
+    detail: { kind, name: kind === "folder" ? "stripe" : "stripe/key" },
+    detailTargets: () => [{ name: "stripe/key", tier: "bio", agent_allowed: true }],
+    accessOf: () => "agents-touch", accessLevel: () => ({ label: "Agents · Touch ID" }),
+    accessDetail: () => "Stored access", yoloOverride: () => "YOLO override updated",
+    isAws: () => false, relTime: () => "now", renderLeaseRows: () => {},
+    leasesOf: () => [], MAX_LEASES_PER_SECRET: 8, granteeValue: (to) => to.value,
+    granteeName: (to) => to.value || "Any agent", joinNames: (names) => names.join(", "),
+    plural: (n, name) => `${n} ${name}s`,
+    syncDetailPrimary: () => {},
+    call: activity, renderActivity: () => {},
+  });
+  vm.runInContext(source.slice(source.indexOf("function chosenGrantee()"), source.indexOf('// "pi", "pi and claude"')), context);
+  vm.runInContext(source.slice(source.indexOf("function syncLeaseControls()"), source.indexOf("function renderActivity(")), context);
+  for (const [id, value] of Object.entries({ "lease-to": "session:chosen", "lease-hours": "3", "lease-cwd": "/project", "lease-cmds": "/usr/bin/true", "lease-uses": "3" })) node(id).value = value;
+  return { nodes, run: (expr) => vm.runInContext(expr, context) };
+}
+for (const kind of ["secret", "folder"]) {
+  for (const failure of [false, true]) {
+    test(`renderDetail ${kind} refresh preserves draft after activity ${failure ? "failure" : "session churn"}`, async () => {
+      const fixture = detailRefreshFixture(kind, async () => {
+        if (failure) throw new Error("offline");
+        return Array.from({ length: 8 }, (_, i) => ({ session: `new-${i}`, kind: "pi", ts: i }));
+      });
+      const before = [...fixture.nodes].map(([id, node]) => [id, node.value]);
+      await fixture.run("renderDetail()");
+      assert.deepEqual(before.map(([id]) => [id, fixture.nodes.get(id).value]), before);
+      assert.equal(fixture.nodes.get("lease-to").value, "session:chosen");
+      assert.equal(fixture.nodes.get("lease-grant").disabled, false);
+      assert.doesNotMatch(fixture.nodes.get("lease-help").textContent, /Any agent/);
+      assert.equal(fixture.nodes.get("detail-access").textContent, kind === "secret" ? "YOLO override updated" : undefined);
+      // Submission still sends the exact draft, never Any agent, after the refresh.
+      fixture.nodes.get("lease-uses").reportValidity = () => true;
+      fixture.run(`
+        toast = () => {}; plural = () => "items"; durShort = () => "1h";
+        loadSecrets = async () => {};
+        ${source.slice(source.indexOf("async function grantLease()"), source.indexOf('// "Agents · no prompt"'))}
+      `);
+      fixture.run("call = async (command, args) => { if (command === 'lease_grant') submitted = { command, args }; return []; }");
+      await fixture.run("grantLease()");
+      const submitted = fixture.run("submitted");
+      assert.equal(submitted.args.to, "session:chosen");
+      assert.equal(submitted.args.cwd, "/project");
+      assert.equal(submitted.args.hours, 3);
+      assert.equal(submitted.args.maxUses, 3);
+      assert.deepEqual(Array.from(submitted.args.cmds), ["/usr/bin/true"]);
+      fixture.nodes.get("lease-to").value = "";
+      fixture.run("syncLeaseControls()");
+      assert.equal(fixture.nodes.get("lease-grant").disabled, true);
+      fixture.run("submitted = null");
+      await fixture.run("grantLease()");
+      assert.equal(fixture.run("submitted"), null);
+    });
+  }
+}
+
+test("rendered Activity strings use temporary access, never lease", () => {
+  const rows = { children: [], replaceChildren() { this.children = []; }, append(row) { this.children.push(row); } };
+  const context = vm.createContext({
+    $: () => rows, whoLabel: () => ({ text: "pi", agent: true }), actionLabel: () => "Secret used",
+    eventSummary: () => "", relTime: () => "now", fullTime: () => "now",
+    el: (tag, attrs = {}, ...children) => ({ tag, ...attrs, children, addEventListener() {} }),
+  });
+  vm.runInContext(source.slice(source.indexOf("let evMoreSeq ="), source.indexOf("async function grantLease()")), context);
+  vm.runInContext('renderActivityInto($("rows"), [{ action: "use", ok: true, detail: { via_lease: ["stripe/key"] } }], false)', context);
+  assert.match(rows.children.map(treeText).join(" "), /via temporary access/);
+  assert.doesNotMatch(rows.children.map(treeText).join(" "), /\blease\b/i);
+  const html = fs.readFileSync(require.resolve("../ui/index.html"), "utf8");
+  assert.doesNotMatch(html.replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]*>/g, ""), /\bleases?\b/i);
 });

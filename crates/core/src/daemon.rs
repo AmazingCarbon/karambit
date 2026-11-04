@@ -3201,8 +3201,9 @@ fn end_temporary(p: &Paths, st: &Ctx, patterns: Vec<String>, grantee: Option<Gra
     if end_yolo {
         // Remove whole records, including future enrollment authority. Never rely on
         // verified list metadata, which can be empty after an envelope changes.
+        // Match the folder selector, not a bare path: key "stripe" is not folder "stripe/".
         g.yolos.retain(|(path, to), y| {
-            let remove = matches(path) || matches(&format!("{path}/"))
+            let remove = matches(&format!("{path}/"))
                 || y.keys.keys().any(|name| matches(name))
                 || patterns.iter().any(|pt| pt.starts_with(&format!("{path}/")));
             if remove {
@@ -5766,6 +5767,9 @@ mod lease_proof_tests {
             start_yolo(&p, &st, "proj", to, 6.0, &calls).unwrap();
         }
         start_yolo(&p, &st, "other", Grantee::Any, 6.0, &calls).unwrap();
+        for name in ["proj/key", "other/key"] {
+            st.lock().unwrap().human.insert((1, 2, name.into()), grantee_lease(name, Grantee::Human, 600, Scope::default()));
+        }
         let st = Rc::new(st);
         let state = st.clone();
         REQUEST_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move |paths, req| {
@@ -5781,9 +5785,12 @@ mod lease_proof_tests {
         assert!(ended.contains(&"proj/".into()));
         assert!(st.lock().unwrap().yolos.keys().all(|(path, _)| path == "other"));
         assert!(st.lock().unwrap().leases.is_empty(), "folder selection ends per-key authority too");
+        assert_eq!(st.lock().unwrap().human.len(), 1, "folder selection removes only its human cache entries");
+        assert!(st.lock().unwrap().human.keys().all(|(_, _, name)| name == "other/key"));
         v.end_temporary_access(&["*".into()]).unwrap();
         assert!(st.lock().unwrap().yolos.is_empty());
         assert!(st.lock().unwrap().leases.is_empty());
+        assert!(st.lock().unwrap().human.is_empty());
         assert!(use_secret(&p, &st, caller_of("pi"), "other/key")["deks"]["other/key"].is_null());
         REQUEST_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(|_, _| Ok(json!({"yolos": "invalid"})))));
         assert!(v.yolos().is_err(), "malformed metadata is not an empty list");
@@ -5793,6 +5800,25 @@ mod lease_proof_tests {
         let events = audit::read(&p, usize::MAX).unwrap();
         assert_eq!(events.iter().filter(|e| e["action"] == "yolo-end").count(), 3);
         assert!(events.iter().any(|e| e["action"] == "revoke"));
+        std::fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn yolo_end_temporary_distinguishes_exact_key_from_same_named_folder() {
+        let (p, st) = grant_fixture("yolo-end-key-folder", &["stripe".into(), "stripe/key".into()]);
+        let calls = Rc::new(Cell::new(0));
+        grant_to(&p, &st, "stripe", Grantee::Any, 2.0, Scope::default(), &calls).unwrap();
+        start_yolo(&p, &st, "stripe", Grantee::Any, 6.0, &calls).unwrap();
+        mutate(&p, &st, Req::EndTemporaryAccess { patterns: vec!["stripe".into()] });
+        assert!(st.lock().unwrap().leases.is_empty(), "exact key access ends");
+        assert_eq!(st.lock().unwrap().yolos.len(), 1, "same-named folder keeps its YOLO");
+        assert!(use_secret(&p, &st, caller_of("pi"), "stripe")["deks"]["stripe"].is_null());
+        assert!(use_secret(&p, &st, caller_of("pi"), "stripe/key")["deks"]["stripe/key"].is_string());
+        mutate(&p, &st, Req::EndTemporaryAccess { patterns: vec!["stripe/key".into()] });
+        assert!(st.lock().unwrap().yolos.is_empty(), "descendant key ends its ancestor YOLO");
+        start_yolo(&p, &st, "stripe", Grantee::Any, 6.0, &calls).unwrap();
+        mutate(&p, &st, Req::EndTemporaryAccess { patterns: vec!["stripe/".into()] });
+        assert!(st.lock().unwrap().yolos.is_empty(), "explicit folder selector ends its YOLO");
         std::fs::remove_dir_all(p.root).unwrap();
     }
 
