@@ -35,12 +35,12 @@ checks. A missing capability must never silently become a software substitute.
 | **(4) Pinned-binary launch channel** | Delivers only to an authenticated helper/shim and binds target/hash/argv/cwd; not immutable execution or same-user isolation. | SHA-256 paired pins, inherited fd-3 Unix socketpair and one-use helper challenge (`crates/core/src/helper.rs`, `launch.rs`, Swift `main.swift`); bound shim/target rechecks and descriptor hygiene (`daemon.rs`, `shim.rs`, all under `crates/core/src/`). Writable pins, hash-to-exec races and cooperative-exec bypass remain (below). | Pinned executable fd / `execveat`, private socketpair, pidfd-bound child and descriptor hygiene. | Pinned executable identity, restricted inherited handles/private pipe and verified child process handle. | **Unbound launch**: refuse command-scoped credential delivery; never fall back to legacy release. Doctor must report missing channel (`unsupported`) or failed pin/child binding (`fail`), including writable trust-root limits. |
 | **(5) Clipboard with history/sync exclusion + auto-clear** | Reduces clipboard retention only where exclusions are honored; does not stop readers or recall copies. | `NSPasteboard` `org.nspasteboard.ConcealedType` / `TransientType`; helper sleeps then clears only if `changeCount` unchanged (`se-helper/Sources/se-helper/main.swift:cmdClip`). **No `.currentHostOnly` yet: Universal Clipboard exclusion is not guaranteed.** Markers are advisory; helper death can prevent clearing. | Wayland compositor-specific sensitive-content/history policy and timed ownership clearing; X11 generally weaker. | Clipboard history/cloud exclusion formats plus sequence-checked timed clear; verify consumer compliance. | **Clipboard retention/sync exposure** (already partial on macOS). Doctor must report known exclusion weakness (`fail`), unsupported exclusions (`unsupported`), or unverified manager behavior (`inconclusive`); timer alone is not a pass. |
 | **(6) Child sandbox** | Constrains a launched process tree's filesystem/IPC/network authority; the child still holds its credential. | **Opt-in spike**: Seatbelt SPI installed by the trusted shim (`core/src/sandbox`, `shim.rs`, under `crates/`). Loopback TCP port allowlist only; remote egress needs a loopback proxy. Deprecated mechanism; not portable confinement certification. | Namespaces + seccomp + Landlock with separately enforced network policy; coverage must be tested. | AppContainer/restricted token with filesystem/IPC/network policy; Job Objects alone are not a security sandbox. | **Mode A only**, no Mode B isolation. Doctor must report `unsupported` when absent, `fail` for an enforced-policy escape, and refuse to label an unconfined run sandboxed. |
-| **(7) Per-user service lifecycle** | Owns in-memory leases/sessions and stops local reuse on expiry/restart; cannot revoke already-issued upstream credentials. | Auto-spawn with `setsid`, private 0700 run directory / 0600 Unix socket, same-UID peer check, reaper and 20-minute idle exit (`crates/core/src/daemon.rs:spawn_real`, `serve`). RAM state is lost on restart; not a protected service account. | systemd user service + private authenticated socket; equivalent in-memory lifecycle. | Per-user service/agent with ACL-protected named pipe and lifecycle supervision. | **No managed session lifetime**: refuse daemon-dependent operations rather than persist secrets as fallback. Doctor must report service unavailable (`inconclusive` if temporary) or unsupported lifecycle (`unsupported`); socket reachability is not lifecycle proof. |
+| **(7) Per-user service lifecycle** | Owns in-memory leases/sessions and stops local reuse on expiry/restart; cannot revoke already-issued upstream credentials. | Auto-spawn with `setsid`, private 0700 run directory / 0600 Unix socket, same-UID peer check, reaper and 20-minute idle exit, which applies only when nothing is keeping the daemon alive (`crates/core/src/daemon.rs:spawn_real`, `serve`, `keeps_alive`: leases, YOLOs, human unlock caches, AWS endpoints, live SSO sessions, pending or live bound launches). RAM state is lost on restart; not a protected service account. | systemd user service + private authenticated socket; equivalent in-memory lifecycle. | Per-user service/agent with ACL-protected named pipe and lifecycle supervision. | **No managed session lifetime**: refuse daemon-dependent operations rather than persist secrets as fallback. Doctor must report service unavailable (`inconclusive` if temporary) or unsupported lifecycle (`unsupported`); socket reachability is not lifecycle proof. |
 | **(8) Screen-lock signal** | Ends human cached authorization on lock, subject to observation latency; does not recall delivered plaintext. | Fail-closed ECDH probe of `WhenUnlocked` open key (`crates/core/src/helper.rs:screen_locked`); daemon checks cached use and five-second reaper (`daemon.rs`). Any probe error counts as locked; not a native lock notification. | logind session lock state/signals, with compositor/session-specific validation. | WTS session lock notifications plus verified current session state. | **No lock-ended cache guarantee**: disable human cache reuse and require fresh presence. Doctor must report absent signal (`unsupported`), known unreliable signal (`fail`) or uncertain observation (`inconclusive`). |
 
 Doctor must identify the capability number, observed mechanism, lost guarantee and
 refused/degraded operation. `inconclusive` and `unsupported` are never passes;
-a positive result covers only the tested environment. Today's seven environment
+a positive result covers only the tested environment. Today's nine environment
 probes (section 6) are not this capability certification. Ports and the platform
 seam are pending: new OS-specific code belongs behind a small platform trait/module
 with a separate macOS implementation and refusing non-macOS stub, not in core logic.
@@ -60,7 +60,7 @@ Karambit (section 4). Any tool you hand a secret to.
 
 **Secrecy is not safety.** Keeping a value out of an agent's context is not the same as
 limiting what the agent can do with the access it was given. In Mode A the tool using the
-credential can do anything the credential allows. Even in Mode C (planned), an agent can
+credential can do anything the credential allows. Even in Mode C (fixed tools today), an agent can
 still cause damage through the broker; only policy limits that. Do not read
 "the agent never saw the password" as "the agent could not misuse the account."
 
@@ -72,9 +72,9 @@ table and in section 3. Each mode has its own guarantee.
 
 | Mode | Who holds plaintext | Guarantee | Non-guarantee | Status |
 |---|---|---|---|---|
-| **A: Trusted-tool injection** | The tool Karambit launches (env var, or an ECS-style loopback credential endpoint) | Karambit does not write the value to disk or config. Non-public literal values Karambit resolved itself (at least 4 bytes), and SSO role credentials minted for a bound launch (added to the redaction set before the target receives them), are redacted from the child's stdout/stderr. Access is audited on a best-effort basis. A lease scopes the access served through it (any non-public secret); an agent-allowed bio secret can also be unlocked without a lease by a fresh Touch ID, and open-tier and public secrets need no lease. | A malicious or compromised tool can read, store and exfiltrate the value. Redaction is a filter on two streams, not a boundary (section 4). Ending a lease does not recall a static credential the tool already copied. | **Current**: `run`, `aws <PROFILE>`, `run --aws` |
+| **A: Trusted-tool injection** | The tool Karambit launches (env var, or an ECS-style loopback credential endpoint) | Karambit does not write the value to disk or config. Non-public literal values Karambit resolved itself (at least 4 bytes), and SSO role credentials minted for a bound launch (added to the redaction set before the target receives them), are redacted from the child's stdout/stderr. Access is audited on a best-effort basis. A lease scopes the access served through it (any non-public secret); an agent-allowed bio secret can also be unlocked without a lease by a fresh Touch ID, and open-tier and public secrets need no lease. A folder YOLO (section 4) covers Only me keys too, without a Touch ID per use. | A malicious or compromised tool can read, store and exfiltrate the value. Redaction is a filter on two streams, not a boundary (section 4). Ending a lease does not recall a static credential the tool already copied. | **Current**: `run`, `aws <PROFILE>`, `run --aws` |
 | **B: Sandboxed execution** | The tool, inside a capability (6) sandbox | Mode A, plus capability (6): the jailed process tree cannot read other secrets (key blobs, `~/.aws`, `~/.vault-token`, the daemon socket) and egress is limited to allowed hosts. It still holds its own credential. | Sandbox escapes; platform policy coverage must be verified. The macOS candidate `sandbox-exec` is deprecated. | **Spike**: `run --jail`; limited to loopback TCP exceptions, not arbitrary host filtering. See limits below. |
-| **C: Broker custody** | The Karambit daemon only | The tool never sees credential bytes. Karambit authorizes each request (fixed tool, later host/method/path) and scrubs responses within stated limits. | An agent can still do damage through the broker; only policy limits that. Scrubbing has size/encoding limits. | **Partly implemented (fixed tools only); the broader broker is planned**. Nothing in the code today. |
+| **C: Broker custody** | The Karambit daemon only | The tool never sees credential bytes. Karambit authorizes each request (fixed tool, later host/method/path) and scrubs responses within stated limits. | An agent can still do damage through the broker; only policy limits that. Scrubbing has size/encoding limits. | **Partly implemented (fixed tools only); the broader broker is planned**. |
 
 Mode-specific exports (`SOPS_AGE_KEY_CMD`, `--file` pipe) are Mode A
 by these definitions and remain planned. This build has no credential-export command.
@@ -97,11 +97,11 @@ Verified against `crates/cli/src/main.rs`, `crates/core/src/*.rs`,
 | `karambit run -- cmd` with `.karambit.env` | **A** | same, refs from `./.karambit.env` (`main.rs:env_specs`) | child |
 | `karambit run --aws P -- cmd`, `karambit aws P -- cmd`, `whoami` | **A** | Bound redemption creates a per-run daemon loopback endpoint; the shim receives only endpoint URI/token and region, never AWS keys. Child gets empty AWS config files. Endpoint lifetime follows the target, including failed exec cleanup. Static key parts and the endpoint token are redacted. | the AWS SDK/CLI in the child, after fetching from the endpoint |
 | `karambit run --no-redact` | **A**, without redaction | human-only (`fence::Verb::NoRedact`, CLI lookup in `launch_bound` and daemon lookup for `RunUnredacted`); child inherits the terminal. | child |
-| `karambit get NAME` | Human disclosure (not A/B/C) | `main.rs:Cmd::Get`: refused for agent callers unless the entry is public (`fence::Verb::Get` CLI lookup in `Cmd::Get`); then `unlock("get", …, gate_open=true)`. Fresh auth depends on the entry: **open-tier** secrets get a Touch ID from the reveal gate (`lib.rs:448-449`); **bio** secrets get it only by unwrapping through the helper, which is **skipped** if a human self-lease ("Only me + Touch ID": bio, agents off, not public) is active, because `unlock` serves it from the daemon with no new prompt until the screen locks or the lease is revoked (`lib.rs:405-426`, `452-459`, `daemon.rs:Req::Use` non-agent branch, `daemon.rs:508-530`). Public entries never prompt. The caller counts as human whenever agent detection did not fire (section 4). Value goes to the clipboard via the helper (`helper.rs:clip`, auto-clears after `clip_seconds`, default 30). | the human; the clipboard until cleared |
+| `karambit get NAME` | Human disclosure (not A/B/C) | `main.rs:Cmd::Get`: refused for agent callers unless the entry is public (`fence::Verb::Get` CLI lookup in `Cmd::Get`); then `unlock("get", …, gate_open=true)`. Fresh auth depends on the entry: **open-tier** secrets get a Touch ID from the reveal gate (`lib.rs:unlock_internal`); **bio** secrets get it only by unwrapping through the helper, which is **skipped** if a human self-lease ("Only me + Touch ID": bio, agents off, not public) is active, because `unlock` serves it from the daemon with no new prompt until the screen locks or the lease is revoked (`lib.rs:unlock_internal`, `daemon.rs:Req::Use` non-agent branch). Public entries never prompt. The caller counts as human whenever agent detection did not fire (section 4). Value goes to the clipboard via the helper (`helper.rs:clip`, auto-clears after `clip_seconds`, default 30). | the human; the clipboard until cleared |
 | `karambit get NAME --stdout` | Human disclosure (not A/B/C) | same gates as `get`; writes the value to stdout. No redaction, so if anything captures that stdout the value is captured. | whoever reads stdout |
-| GUI "copy" | Human disclosure (not A/B/C) | `app/src-tauri/src/main.rs:copy_secret` (`:65-69`): `unlock("copy", …, gate_open=true)` then `helper::clip`; the same gates as `get` apply, including the human self-lease exception (a leased bio secret is copied with no fresh Touch ID). The GUI process is the caller (`Caller::gui()`, treated as human). The Rust side returns only the seconds-to-clear number, not the value, to the webview. The helper sets the pasteboard with `org.nspasteboard.ConcealedType`/`TransientType` markers and clears after N seconds if unchanged (`se-helper/.../main.swift`). | the human; the clipboard until cleared (any same-user process can read the pasteboard meanwhile) |
-| GUI "add" (new secret) | not an injection; outside A/B/C | Creating a new name needs **no** Touch ID (`lib.rs:285-287,316-317`); only overwrite authenticates. `app/src-tauri/src/main.rs:add` takes the value from the webview as a string: the webview process does hold plaintext at entry time. (A native secure input path is not implemented.) | GUI webview, briefly |
-| GUI/CLI "delete" | no plaintext | Agent callers are refused outright, with no prompt: `fence::Verb::Rm` is checked in the CLI (`lib.rs:remove`, `:890-891`) and in the daemon (`fence::request_verb` maps `Req::Delete` to `Rm`). For a human (including the GUI, `app/src-tauri/src/main.rs:60-62`), `lib.rs:remove_internal` (`:901-902`) asks for Touch ID only if any target is bio tier; deleting open-tier secrets is not prompted. | n/a |
+| GUI "copy" | Human disclosure (not A/B/C) | `app/src-tauri/src/main.rs:copy_secret`: `unlock("copy", …, gate_open=true)` then `helper::clip`; the same gates as `get` apply, including the human self-lease exception (a leased bio secret is copied with no fresh Touch ID). The GUI process is the caller (`Caller::gui()`, treated as human). The Rust side returns only the seconds-to-clear number, not the value, to the webview. The helper sets the pasteboard with `org.nspasteboard.ConcealedType`/`TransientType` markers and clears after N seconds if unchanged (`se-helper/.../main.swift`). | the human; the clipboard until cleared (any same-user process can read the pasteboard meanwhile) |
+| GUI "add" (new secret) | not an injection; outside A/B/C | Creating a new name needs **no** Touch ID (`lib.rs:add_internal`); only overwrite authenticates. `app/src-tauri/src/main.rs:add` takes the value from the webview as a string: the webview process does hold plaintext at entry time. (A native secure input path is not implemented.) | GUI webview, briefly |
+| GUI/CLI "delete" | no plaintext | Agent callers are refused outright, with no prompt: `fence::Verb::Rm` is checked in the CLI (`lib.rs:remove`) and in the daemon (`fence::request_verb` maps `Req::Delete` to `Rm`). For a human (including the GUI, `app/src-tauri/src/main.rs:remove`), `lib.rs:remove_internal` asks for Touch ID only if any target is bio tier; deleting open-tier secrets is not prompted. | n/a |
 | GUI/CLI "rename" (`mv`, Edit name, folder move) | plaintext in the daemon, briefly | Agent callers are refused outright (`fence::Verb::Rename`, CLI `lib.rs:rename` and daemon `Req::Rename`). The name is bound into both AADs, so `lib.rs:rename_internal` unwraps each DEK (Touch ID for bio; an explicit Touch ID when every target is open tier), reseals the value and rewraps the same DEK under the new name with the same tier, agent flag and public flag. The existing backup copy is kept (same DEK). New files are created with `save_secret_new` (never replacing a secret); all are written before any old file is removed, and written ones are removed again if one fails. Leases on the old names end. `aws/*` and `sources/*` are refused. | daemon process, briefly |
 | `list`, `status`, `policy`, `lease *`, `audit` | no plaintext | metadata only | n/a |
 
@@ -135,7 +135,8 @@ Notes on what Mode A redaction actually covers (`shim.rs`, `redact.rs`):
 
 All of the following are true in release 0.1.0. They are stated so neither the README nor the docs
 imply otherwise. The only hard boundary against a determined
-same-user process is capability (1)'s fresh user-presence unwrap (`bio`, currently Touch ID); everything else below is enforced in software
+same-user process is capability (1)'s fresh user-presence unwrap (`bio`, currently Touch ID), and it does not apply to keys already
+released through a lease, a human unlock cache or a folder YOLO; everything else below is enforced in software
 that the same user can edit, replace, or bypass.
 
 Numbers refer to the numbered limits in this section; "fix" column is the planned mitigation, if
@@ -146,7 +147,7 @@ any. Nothing in that column is implemented yet.
 | #6 | **No-prompt keys are usable by any process running as you.** `open.key` and `agent.key` are files; the Secure Enclave binds them to this Mac, not to Karambit. A 20-line foreign program using CryptoKit decrypted no-prompt secrets without Karambit (verified in testing). So Public and Agents-level secrets are readable by any code you run outside a jail. | limit #6; README Limits | Keychain ACL spike, code-signature check: not implemented. Separate macOS user: not implemented. Mode B jail hides blobs only for jailed trees. |
 | #8 | **Injected env is readable by same-user processes** while the child runs (for example `ps -E`). AWS-profile delivery (`aws <PROFILE>`/`run --aws`) uses the loopback endpoint instead; ordinary `run -e`, including AWS-named variables, uses the env (`cmd_run`). | `shim.rs` explicit target envp; limit #8 | `--file`/pipe delivery is not implemented; the doctor can check sibling env |
 | #9 | **Redaction is defeated by re-encoding.** It matches literal bytes (plus 16-byte fragments for long values). base64, hex, URL-encoding, splitting with inserted bytes, or short values are not caught. Redaction firing does not prove a leak; redaction not firing does not prove safety. | `redact.rs`; limit #9 | encoding-aware redaction + short-value warnings: not implemented |
-| #12 | **AWS SSO access levels are daemon-enforced, not Secure Enclave-enforced.** One SSO session can mint any role the user has in that portal. The daemon enforces levels from what you approved at login, not from vault files. It holds against agents that go through Karambit or the daemon socket; a process able to read daemon memory could take SSO tokens (needs debugger rights with SIP on; untested). Role credentials already handed out stay valid at AWS until their own expiry after a sign-out or limit. | limit #12; README §AWS SSO | by design; no step |
+| #12 | **AWS SSO access levels are daemon-enforced, not Secure Enclave-enforced.** One SSO session can mint any role the user has in that portal. The daemon enforces levels from what you approved at login, not from vault files. It holds against agents that go through Karambit or the daemon socket; a process able to read daemon memory could take SSO tokens (a same-user `lldb` attach was refused in an earlier macOS 26 check, not re-run for each build; reading SSO tokens from daemon memory was not tested). Role credentials already handed out stay valid at AWS until their own expiry after a sign-out or limit. | limit #12; README §AWS SSO | by design; no step |
 | #13 | Secrets Manager values a child fetches itself are not redacted (section 3). Open. | limit #13 | Mode C or read-only roles |
 
 Other limits, same source, all open in release 0.1.0:
@@ -212,15 +213,24 @@ Other limits, same source, all open in release 0.1.0:
   helper pin check (#11). Builds installed before this change still carry the override.
 - **GUI is treated as the human caller** (`Caller::gui()`). There is no blanket Touch ID on
   GUI actions; gates are per operation: copy = `get` rules (human self-lease bypass, above);
-  creating a new secret = no prompt; overwrite = Touch ID (`lib.rs:316-317`); delete = Touch
-  ID only for bio targets (`lib.rs:901-902`), and agent callers are refused outright (`fence::Verb::Rm`); relaxing policy or config = Touch ID
-  (`lib.rs:626-629,733`).
+  creating a new secret = no prompt; overwrite = Touch ID (`lib.rs:add_internal`); delete = Touch
+  ID only for bio targets (`lib.rs:remove_internal`), and agent callers are refused outright (`fence::Verb::Rm`); relaxing policy or config = Touch ID
+  (`lib.rs:set_policy_internal`, `set_config_internal`).
+- **Folder YOLO removes the Touch ID barrier for the named agent.** One Touch ID at start gives a
+  named agent (kind, `any` or one session) RAM-only access to every non-public key below a folder for
+  up to 7 days, including **Only me** keys and keys added or moved there later through Karambit. It does not cover
+  `aws/` or `sources/`. YOLO has no command, working-folder or use-count scope, and it survives
+  screen lock. While it is active, Touch ID is not a barrier for that agent on covered keys, and
+  values already released cannot be recalled. `lease revoke NAME` leaves a YOLO alone; use `yolo end`,
+  block agents, or stop the daemon. It also ends on expiry or daemon restart. Stored access levels,
+  encryption and output redaction are unchanged (`daemon.rs:end_temporary`, `Req::Revoke`; see
+  [reference](reference.md#yolo-for-a-folder)).
 - **Lease and SSO state live in daemon RAM.** This is good for persistence (nothing on disk)
   but the daemon is a same-user process (`daemon.rs`, peer identity via `LOCAL_PEERTOKEN`).
 - **Ad-hoc signed, not notarized.** There is no code-signature check on callers. `install.sh`
   signs the CLI, the helper and the app with the hardened runtime (`codesign -s - -o runtime`,
-  no `get-task-allow`): on macOS 26 a same-user `lldb` attach to the daemon is refused and
-  `DYLD_INSERT_LIBRARIES` is ignored (tested). Builds that are not installed through
+  no `get-task-allow`): on macOS 26 a same-user `lldb` attach to the daemon was refused and
+  `DYLD_INSERT_LIBRARIES` was ignored in an earlier test, not re-run for each build. Builds that are not installed through
   `install.sh` (for example `cargo build`) are not hardened. This does not stop a same-user
   process from replacing the binaries or editing the pins (above), and it does not protect the
   key files (#6).
@@ -228,14 +238,14 @@ Other limits, same source, all open in release 0.1.0:
 ## 5. What a lease, a revoke or a logout does not do
 
 - Revoking a lease (`Req::Revoke`) removes only the daemon's agent leases and human
-  self-leases (`g.leases`, `g.human`; `daemon.rs:600-615`). It stops further dispensing
-  **through that lease**. It does not touch open AWS endpoints (`g.aws` is not modified):
+  self-leases (`g.leases`, `g.human`; `daemon.rs:end_temporary`). It stops further dispensing
+  **through that lease**. It does not end folder YOLOs (`g.yolos`). It does not touch open AWS endpoints (`g.aws` is not modified):
   `serve_aws` checks only the endpoint's own expiry and bearer token, not any Karambit lease
-  (`daemon.rs:1092-1116`) plus the current block flags and policy `run` rule for the endpoint's
+  (`daemon.rs:serve_aws`) plus the current block flags and policy `run` rule for the endpoint's
   caller (a new `deny` ends the endpoint on its next fetch; `approve` is not re-prompted), so a
-  running `aws <PROFILE>`/`run --aws` child keeps getting credentials until the endpoint TTL (60 s to 12 h, `daemon.rs:633-637`) or `AwsClose`.
+  running `aws <PROFILE>`/`run --aws` child keeps getting credentials until the endpoint TTL (60 s to 12 h, `daemon.rs:Req::AwsOpen`) or `AwsClose`.
   For SSO endpoints the daemon can keep minting fresh role credentials from the session
-  while it is valid (`daemon.rs:1117-1132`, `sso_fresh_creds`). Upstream credentials
+  while it is valid (`daemon.rs:sso_fresh_creds`). Upstream credentials
   (static keys, already-issued role credentials) stay valid at AWS until their own expiry
   (README §AWS SSO). A static credential a Mode A tool copied cannot be recalled. A tool that
   holds a long-term key can also mint its own `sts get-session-token` credentials (up to 36 h);
@@ -250,16 +260,16 @@ Other limits, same source, all open in release 0.1.0:
   see [the backend amendment](#linked-backends-interface) for its
   production availability and limits.
 - Several distinct clocks already exist and are not one lease length: the Karambit lease,
-  the AWS endpoint TTL (`daemon.rs:633-637`), SSO access-token expiry and refresh
-  (`daemon.rs:950-959`), and upstream role-credential expiry with a cache freshness margin
-  (`daemon.rs:1021-1025,1044`). They are not exposed as one model. The backend contract defines a
+  the AWS endpoint TTL (`daemon.rs:Req::AwsOpen`), SSO access-token expiry and refresh
+  (`daemon.rs:sso_fresh_creds`), and upstream role-credential expiry with a cache freshness margin
+  (`daemon.rs:sso_fresh_creds`). They are not exposed as one model. The backend contract defines a
   unified five-clock backend contract (lease, backend login, upstream credential, cache,
   actual revocation). That backend lifecycle is now implemented separately; see
   [the backend amendment](#linked-backends-interface).
 
 ## 6. Doctor (`karambit doctor --agent-env`)
 
-`karambit doctor --agent-env [--json]` runs seven rows from the environment it is launched in
+`karambit doctor --agent-env [--json]` runs nine rows from the environment it is launched in
 (so run it from a plain shell and again from inside an agent to compare). Each row is
 `pass`, `fail`, `inconclusive` or `unsupported` with a one-line reason; the footer is
 `scope: this run only`. Exit code is 0 whatever the rows say; non-zero only if the doctor
@@ -274,6 +284,7 @@ itself cannot run.
 | `audit-config-pin-writable` | `access(W_OK)` / metadata on `audit.jsonl`, `config.json`, `keys/*.sha256` (plus the canonical `helper.sha256`/`daemon.sha256`) and their directories. Nothing is opened for write. | fail: any discovered target is tamperable from here (file writable, or replaceable/creatable through a writable directory). inconclusive: nothing tamperable was found but something could not be judged (e.g. `keys/` cannot be listed, so extra pins are unknown; a metadata or access error other than a plain denial). pass: everything was judged and none is writable. |
 | `redaction` | Pushes the canary's echo, base64 and 20-char truncation through the same `Redactor` a bound launch builds. | pass only if all three are redacted. Today the base64 form is **not** redacted, so the row reports `fail` (known limit #9, encoding-aware redaction planned); it lists which forms were redacted. |
 | `remote-login` | Read-only. `systemsetup -getremotelogin` when it answers without admin rights; else `launchctl print system/com.openssh.sshd` (job loaded) and a 500 ms TCP connect to 127.0.0.1:22. Nothing is written or changed. | fail: Remote Login looks on (any signal). pass: `systemsetup` says off, or no signal found (the pass text says systemsetup was not usable). A custom sshd on another port is not seen. |
+| `jail-availability` | Reports whether the Seatbelt SPI used by `run --jail` (capability 6) is linked. | inconclusive: the SPI is linked (availability is not proof the jail enforces anything). unsupported: not linked or not macOS. **Never `pass`.** |
 | `caller-agent` | Reports what `agent::detect` found for this process. | Always `pass`: it states the detection result (agent label, `no agent detected (human shell)`, or that the caller arrived over SSH); it is not a verdict. Detection is a heuristic (section 4). |
 
 What the doctor never does: open any secret or key file of the live vault (it only reads
@@ -322,12 +333,13 @@ What a doctor result does and does not prove:
 
 - Values are encrypted at rest and wrapped using capability (1), currently Secure Enclave keys; the Touch ID tier is
   enforced by the Secure Enclave for unwraps that go through the helper (README §Model).
-  Not for a bio secret while a human self-lease is active.
+  Not for a bio secret while a human self-lease or a covering folder YOLO is active.
 - `run`/`aws <PROFILE>` deliver values to a tool you choose (Mode A), redact non-public
   Karambit-resolved literal values of at least 4 bytes (and SSO role credentials as they are minted)
   from that tool's stdout/stderr (not short values), and attempt to audit the use (audit is best effort).
   A lease scopes the access served through it; an agent-allowed bio secret can also be
-  unlocked with a fresh Touch ID without a lease; open-tier access needs no lease.
+  unlocked with a fresh Touch ID without a lease; open-tier access needs no lease. A folder YOLO gives
+  the named agent covered keys, Only me included, without a Touch ID per use.
 - On the AWS-profile paths (`aws <PROFILE>`, `run --aws`), AWS keys are delivered through the
   loopback endpoint, and the known AWS env variables are removed from the child's env. Not
   for `run -e AWS_...=ref` or AWS variables elsewhere.
@@ -338,7 +350,7 @@ What a doctor result does and does not prove:
   and no-prompt secrets are readable by any same-user process (#6).
 - "Redaction protects against leaks". It protects against accidental plain-text echo only
   (#9, #13).
-- "Sandboxed", "custody", "broker" for anything today. Modes B and C are planned.
+- "Sandboxed", "custody", "broker" for ordinary `run`/`aws` runs. `run --jail` is an experimental spike and `call` covers fixed tools only.
 - "Same-user safe" or "tamper-proof". Not true at this commit (section 4).
 - A doctor result as a host-wide verdict (section 6).
 

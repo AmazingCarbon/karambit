@@ -125,3 +125,10 @@ Existing account/role profiles are skipped, never overwritten; name collisions g
 In Settings › AWS sign-in, choose **Import all roles** on a signed-in portal, filter/check
 roles, choose access, and Import.
 
+**Account names.** When an import adds at least one new profile, it also saves the portal's name for
+each account it listed in `config.json`. The names are display labels only and grant no access; the app
+shows them next to the account number and in search. An import that finds no new profiles does not
+update names. Profiles added with `aws add --sso` show the account number only until a later import
+saves a name. Import does not remove old names, so they can go stale if an account is renamed in AWS.
+Changing a portal's start URL or removing the portal clears its saved names.
+

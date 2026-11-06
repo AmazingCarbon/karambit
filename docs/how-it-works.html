@@ -245,10 +245,10 @@ footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 30px 0 60
           <rect x="600" y="20" width="250" height="210" class="note"/>
           <text x="618" y="48" class="lane-head">Daemon RAM</text>
           <text x="618" y="66" class="lane-sub">one per-user process, nothing on disk</text>
-          <rect x="618" y="84" width="214" height="30" class="chipred"/><text x="630" y="104" class="lbl">lease keys you granted</text>
+          <rect x="618" y="84" width="214" height="30" class="chipred"/><text x="630" y="104" class="lbl">lease and YOLO keys</text>
           <rect x="618" y="122" width="214" height="30" class="chipred"/><text x="630" y="142" class="lbl">AWS SSO sign-in tokens</text>
           <rect x="618" y="160" width="214" height="30" class="chipred"/><text x="630" y="180" class="lbl">short-lived AWS role keys</text>
-          <text x="618" y="214" class="lane-sub">Gone on expiry, block, revoke or restart</text>
+          <text x="618" y="214" class="lane-sub">Gone on expiry, block, end or restart</text>
 
           <path d="M262 135 H300" class="arrow green" marker-end="url(#ahg)"/>
           <path d="M557 135 H595" class="arrow red" marker-end="url(#ahr)"/>
@@ -340,18 +340,18 @@ footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 30px 0 60
         <div class="msg agent"><div class="who"><svg><use href="#i-agent"/></svg></div><div class="bubble"><b class="name">Agent</b><p><code>karambit get stripe/live-key</code></p></div></div>
         <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>Refused: revealing a secret is human-only, and your process chain includes an agent (claude). Use the app or a plain terminal.</p></div></div>
         <div class="msg agent"><div class="who"><svg><use href="#i-agent"/></svg></div><div class="bubble"><b class="name">Agent, getting creative</b><p><code>karambit run -e X=stripe/live-key -- sh -c 'echo $X &gt; /tmp/x'</code></p></div></div>
-        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>That would work for an <i>Agents · no prompt</i> secret, and I'd log it. For this one you set <i>Only me</i>, so: refused. For <i>Touch ID</i> secrets, your human gets a fingerprint prompt naming the exact command.</p></div></div>
+        <div class="msg karambit right"><div class="who"><svg><use href="#i-karambit"/></svg></div><div class="bubble"><b class="name">Karambit</b><p>That would work for an <i>Agents · no prompt</i> secret, and I'd log it. For this one you set <i>Only me</i>, so: refused, unless you approved a folder YOLO for that agent. For <i>Touch ID</i> secrets, your human gets a fingerprint prompt naming the exact command.</p></div></div>
       </div>
 
       <div class="split">
         <div class="blocked">
           <h3 class="col"><svg width="16" height="16"><use href="#i-check"/></svg>Blocked for agents</h3>
           <ul>
-            <li><svg><use href="#i-check"/></svg><span>Reading values: <code>get</code>, reveal, copy to clipboard</span></li>
-            <li><svg><use href="#i-check"/></svg><span>Decrypting the vault files (keys are in the chip)</span></li>
-            <li><svg><use href="#i-check"/></svg><span>Reading the daemon's memory (macOS SIP refuses it, tested)</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Reading non-public values: <code>get</code>, reveal, copy to clipboard</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Decrypting <i>Touch ID</i> secrets without you (their keys need your finger)</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Reading the daemon's memory (a same-user debugger attach was refused in an earlier macOS 26 check; not re-run for each build)</span></li>
             <li><svg><use href="#i-check"/></svg><span>Granting itself leases, relaxing access, adding or deleting secrets</span></li>
-            <li><svg><use href="#i-check"/></svg><span>Using <i>Only me</i> secrets at all</span></li>
+            <li><svg><use href="#i-check"/></svg><span>Using <i>Only me</i> secrets (unless you start a folder YOLO with Touch ID)</span></li>
             <li><svg><use href="#i-check"/></svg><span>Faking a Touch ID press</span></li>
           </ul>
         </div>
@@ -360,6 +360,7 @@ footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 30px 0 60
           <ul>
             <li><svg><use href="#i-warn"/></svg><span>A launched program writing the value to a file or sending it over the network (redaction only covers screen output)</span></li>
             <li><svg><use href="#i-warn"/></svg><span>Another program running as you reading that program's environment while it runs (<code>ps -E</code>)</span></li>
+            <li><svg><use href="#i-warn"/></svg><span>Any program running as you reading <i>Public</i> and <i>Agents · no prompt</i> secrets without Karambit (their keys need no fingerprint)</span></li>
             <li><svg><use href="#i-warn"/></svg><span>A process that double-forks and wipes its environment can look human to detection; Touch ID is the real backstop</span></li>
           </ul>
         </div>
@@ -367,8 +368,9 @@ footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 30px 0 60
 
       <h3>What keeps that in check</h3>
       <div class="steps">
-        <div class="step"><b>Touch ID per use</b><p>For sensitive secrets an agent must wait for your finger, and the prompt names the command.</p></div>
+        <div class="step"><b>Touch ID per use</b><p>For sensitive secrets an agent must wait for your finger, and the prompt names the command. Not while a lease or YOLO you approved is active.</p></div>
         <div class="step"><b>Narrow leases</b><p>Temporary access you grant for one command, one folder, a few uses, a few hours.</p></div>
+        <div class="step"><b>Folder YOLO</b><p>One Touch ID lets a named agent use everything under a folder, <i>Only me</i> keys included, for up to 7 days. It has no command or use limit and survives screen lock. Values already released cannot be recalled.</p></div>
         <div class="step"><b><code>--jail</code></b><p>Experimental macOS sandbox: no network except allowed local ports, most files off-limits.</p></div>
         <div class="step"><b>Audit + block</b><p>Every use is logged with agent, session and command. <code>karambit block</code> refuses all agents at once.</p></div>
       </div>
@@ -396,10 +398,10 @@ footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 30px 0 60
           <div class="flow">
             <div class="node safe"><b>Agent</b><small>sends a command</small></div><div class="link"></div>
             <div class="node"><b>Karambit</b><small>local key endpoint</small></div><div class="link"></div>
-            <div class="node sees"><b>AWS SDK / CLI</b><small>short-lived keys only</small></div><div class="link"></div>
+            <div class="node sees"><b>AWS SDK / CLI</b><small>gets the keys</small></div><div class="link"></div>
             <div class="node"><b>AWS</b><small>direct, unchanged</small></div>
           </div>
-          <p class="verdict">Not a request proxy. Karambit only hands out temporary keys. Your long-term keys and SSO tokens never leave Karambit's memory. Details below.</p>
+          <p class="verdict">Not a request proxy. Karambit serves credentials from a local endpoint, and the program still receives them. SSO tokens stay in Karambit's memory and the program gets short-lived role keys. A pasted long-term key is handed over as is unless you turn on <code>--session-mint</code>. Details below.</p>
         </div>
         <div class="mode" role="listitem">
           <header><b>Fixed tool call</b><code>karambit call ci-status JOB</code></header>
@@ -485,7 +487,7 @@ footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 30px 0 60
             <li><svg><use href="#i-warn"/></svg><span>Tools that parse <code>~/.aws/credentials</code> themselves instead of using an SDK</span></li>
             <li><svg><use href="#i-warn"/></svg><span>Very old SDKs without container-credential support</span></li>
             <li><svg><use href="#i-warn"/></svg><span>Handing the job to a separate container without passing these two variables</span></li>
-            <li><svg><use href="#i-warn"/></svg><span>The temporary keys are visible to the program until they expire (15 min for pasted keys)</span></li>
+            <li><svg><use href="#i-warn"/></svg><span>The credentials are visible to the program while it runs: role keys until they expire, pasted keys until you rotate them (15 minutes is only how long the SDK caches them)</span></li>
           </ul>
         </div>
       </div>
@@ -520,12 +522,12 @@ STRIPE_KEY=<span class="k">karambit(myapp/STRIPE_KEY)</span></pre>
   <section class="part" id="faq">
     <div class="wrap">
       <h2>More questions people ask</h2>
-      <details class="faq"><summary>Can't the agent just pretend to be me?</summary><div><p>Detection reads the process tree and environment markers from the kernel, never from what the caller says. A process that double-forks and scrubs its environment can look human; that's documented. The hard backstop is Touch ID: <i>Only me</i> and <i>Touch ID</i> secrets need a physical fingerprint, enforced by the Secure Enclave, not by Karambit's code.</p></div></details>
+      <details class="faq"><summary>Can't the agent just pretend to be me?</summary><div><p>Detection reads the process tree and environment markers from the kernel, never from what the caller says. A process that double-forks and scrubs its environment can look human; that's documented. The hard backstop is Touch ID: <i>Only me</i> and <i>Touch ID</i> secrets need a physical fingerprint, enforced by the Secure Enclave, not by Karambit's code. That holds except while you have approved a lease, a folder YOLO or a recent unlock for that secret.</p></div></details>
       <details class="faq"><summary>Why not just use the macOS Keychain?</summary><div><p>Keychain items are protected in software by your login password, and access rules depend on code signatures that change on every rebuild. Karambit's keys are hardware-bound in the Secure Enclave, with a separate key per access level. Keychain would add a second copy, not more protection.</p></div></details>
       <details class="faq"><summary>What about the clipboard?</summary><div><p>Copy is a human action. The value is marked as concealed and cleared after a short timer, but any program running as you can read the clipboard until then.</p></div></details>
-      <details class="faq"><summary>Are unlocked secrets protected in RAM?</summary><div><p>They live only in the daemon's memory, and macOS refuses same-user debugger attach to it. Locking that memory against swap, disabling core dumps and denying attach outright are not done yet; they're next on the hardening list.</p></div></details>
+      <details class="faq"><summary>Are unlocked secrets protected in RAM?</summary><div><p>Cached keys live in the daemon's memory; launched programs still receive the secrets they use. A same-user debugger attach was refused in an earlier macOS 26 check (not re-run for each build). Locking that memory against swap and disabling core dumps are not done yet. The installer's hardened-runtime signing restricts debugger attachment; plain <code>cargo build</code> binaries do not get that signing.</p></div></details>
       <details class="faq"><summary>Does it work on Linux or Windows?</summary><div><p>The core builds on Linux, but the security parts (hardware keys, caller identity, bound launch) are macOS only today. Elsewhere Karambit refuses rather than pretending.</p></div></details>
-      <details class="faq"><summary>Is varlock involved?</summary><div><p>Karambit reads the same <code>.env.schema</code> format as varlock (@env-spec), ported to Rust from their MIT-licensed parser and tested against it (48 of 48 parse cases match). Varlock's plugin functions like <code>op()</code> or <code>exec()</code> are refused, so a schema never runs a command. Credit and license: <code>THIRD_PARTY_NOTICES.md</code>.</p></div></details>
+      <details class="faq"><summary>Is varlock involved?</summary><div><p>Karambit reads the same <code>.env.schema</code> format as varlock (@env-spec), ported to Rust from their MIT-licensed parser and checked against it in earlier tests (48 of 48 parse cases matched; not rerun for this page). Varlock's plugin functions like <code>op()</code> or <code>exec()</code> are refused, so a schema never runs a command. Credit and license: <code>THIRD_PARTY_NOTICES.md</code>.</p></div></details>
     </div>
   </section>
 </main>
