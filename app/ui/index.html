@@ -46,7 +46,7 @@
           </div></li>
           <li class="stp"><span class="nm3" aria-hidden="true">3</span><div><h2>Your first secret</h2><p>Name it <span class="mono">stripe/live-key</span>: the part before the slash becomes its folder.</p></div></li>
         </ol>
-        <div class="init-actions"><button type="button" class="link quiet" id="init-skip">Set up without a backup…</button><span class="sp"></span><button type="button" class="btn primary" id="init-btn">Continue: make a paper backup</button></div>
+        <div class="init-actions"><button type="button" class="link quiet" id="init-skip">Set up without a backup</button><span class="sp"></span><button type="button" class="btn primary" id="init-btn">Continue: make a paper backup</button></div>
       </div>
     </section>
 
@@ -66,7 +66,7 @@
               <div class="menu-group" id="more-vault-label">Whole vault</div>
               <div role="group" aria-labelledby="more-vault-label">
                 <button id="leases-end-all" class="menu-item danger-text" role="menuitem" hidden>End all temporary access</button>
-                <button id="block-agents-menu" class="menu-item danger-text" role="menuitem">Block all agents…</button>
+                <button id="block-agents-menu" class="menu-item danger-text" role="menuitem">Block all agents</button>
               </div>
             </div>
           </details>
@@ -114,7 +114,7 @@
       <nav class="breadcrumbs aws-top" aria-label="Section"><b>AWS</b><button id="aws-find" class="btn sm">Find <kbd>⌘K</kbd></button></nav>
       <div class="page-head head-row aws-head"><h1 class="mono">aws/</h1>
         <div class="head-actions">
-          <details id="aws-portals" class="portals-menu"><summary id="portals-btn" class="btn">Portals</summary><div class="portals-popover"><button class="ibtn" id="portals-close" aria-label="Close portals">×</button><div id="portal-items"></div><button id="sso-add" class="btn">Add portal…</button></div></details>
+          <details id="aws-portals" class="portals-menu"><summary id="portals-btn" class="btn">Portals</summary><div class="portals-popover"><button class="ibtn" id="portals-close" aria-label="Close portals">×</button><div id="portal-items"></div><button id="sso-add" class="btn">Add portal</button></div></details>
           <button id="aws-open" class="btn primary">New profile</button>
         </div>
       </div>
@@ -170,7 +170,7 @@
         <div class="sum" id="status-attention" role="list" aria-label="Needs attention"></div>
         <div class="grid2">
           <div><div class="sh2"><h2 class="lbl">This Mac</h2></div><div class="kvc" id="status-mac"></div></div>
-          <div><div class="sh2"><h2 class="lbl">Agents</h2><span class="sp"></span><button type="button" class="btn sm danger-ghost" id="status-block">Block all agents…</button></div><div class="kvc" id="status-agents"></div></div>
+          <div><div class="sh2"><h2 class="lbl">Agents</h2><span class="sp"></span><button type="button" class="btn sm danger-ghost" id="status-block">Block all agents</button></div><div class="kvc" id="status-agents"></div></div>
         </div>
         <div class="sh2"><h2 class="lbl">Temporary access</h2><span class="hint" id="status-leases-count"></span></div>
         <div class="lrows" id="status-leases"></div>
@@ -229,7 +229,7 @@
           <div class="setrow">
             <span class="gly" id="backup-gly" aria-hidden="true"></span>
             <span class="tx2"><b>Paper backup</b><small id="backup-state"></small></span>
-            <button type="button" class="btn sm" id="backup-verify-open">Check paper key</button><button type="button" class="btn sm" id="backup-rotate-open">New paper key…</button>
+            <button type="button" class="btn sm" id="backup-verify-open">Check paper key</button><button type="button" class="btn sm" id="backup-rotate-open">New paper key</button>
           </div>
           <div class="setrow" id="backup-missing-row" hidden>
             <span class="tx2"><b id="backup-missing-title"></b><small id="backup-missing-sub"></small></span>
@@ -237,7 +237,7 @@
           </div>
           <div class="setrow">
             <span class="tx2"><b>Restore from paper backup</b><small>Only if Touch ID no longer opens your secrets: fingerprints changed, keys lost, or a vault copied from another Mac. Replaces this Mac’s keys.</small></span>
-            <button type="button" class="btn sm" id="backup-recover-open">Restore…</button>
+            <button type="button" class="btn sm" id="backup-recover-open">Restore</button>
           </div>
           <details class="disc" id="backup-advanced"><summary>Use your own age key instead <span class="hint">(advanced)</span></summary>
             <div class="row stack">
@@ -251,11 +251,11 @@
         <div class="card setrows">
           <div class="setrow">
             <span class="tx2"><b>Block all agents</b><small id="block-state">Refuses every agent request until you unblock. Ends temporary access. Running programs aren’t stopped. Touch ID.</small></span>
-            <button type="button" class="btn sm danger-ghost" id="block-agents-settings">Block all agents…</button>
+            <button type="button" class="btn sm danger-ghost" id="block-agents-settings">Block all agents</button>
           </div>
         </div>
 
-        <div class="sh2 sec-gap" id="settings-projects"><h2 class="sec">Project files</h2><span class="sp"></span><button type="button" class="btn sm primary" id="profile-add" aria-expanded="false" aria-controls="profile-add-box">Trust a .karambit.env…</button></div>
+        <div class="sh2 sec-gap" id="settings-projects"><h2 class="sec">Project files</h2><span class="sp"></span><button type="button" class="btn sm primary" id="profile-add" aria-expanded="false" aria-controls="profile-add-box">Trust a .karambit.env</button></div>
         <p class="hint sh-intro">Agents can use a project’s <span class="mono">.karambit.env</span> only after you trust its exact contents (Touch ID). It holds names like <span class="mono">stripe/live-key</span>, never values.</p>
         <div class="profile-add" id="profile-add-box" hidden>
           <label class="sr-only" for="profile-path">Project folder or .karambit.env path</label>

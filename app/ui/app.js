@@ -128,6 +128,10 @@ function relTime(ts) {
 }
 const fullTime = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : "");
 const groupAccount = (a) => String(a || "").replace(/^(\d{4})(\d{4})(\d{4})$/, "$1 $2 $3");
+// Stored display name for an account in one portal ("" when the portal or name is unknown).
+const awsAccountName = (portal, account) => ssoPortals.find((p) => p.portal === portal)?.accounts?.[account] || "";
+// "Name · 1234 5678 9012", or just the number when no name is stored.
+const awsAccountText = (portal, account) => [awsAccountName(portal, account), groupAccount(account)].filter(Boolean).join(" · ");
 
 function splitName(name) {
   const i = name.lastIndexOf("/");
@@ -802,7 +806,7 @@ function searchFields(s) {
   if (isAws(s.name)) {
     const m = freshMeta(s), r = ssoRegistered[s.name], portal = r?.portal || awsPortalFor(s);
     const account = r?.account || (m && m.sso ? m.account : "");
-    const accountName = ssoPortals.find((p) => p.portal === portal)?.accounts?.[account] || "";
+    const accountName = awsAccountName(portal, account);
     fields.push({ text: ["aws", portal, account, accountName, r?.role, m && !m.error ? awsSummary(m) : ""].filter(Boolean).join(" "), weight: 0.6 });
   }
   return fields;
@@ -948,12 +952,12 @@ function renderBlock() {
     banner.replaceChildren(
       el("span", { class: "txt" }, el("b", { textContent: lead }), " Every request is refused."),
       el("span", { class: "sp" }),
-      el("button", { type: "button", class: "btn sm", textContent: "Unblock…", onclick: () => setBlocked(false, b) }));
+      el("button", { type: "button", class: "btn sm", textContent: "Unblock", onclick: () => setBlocked(false, b) }));
   }
   for (const id of ["block-agents-menu", "block-agents-settings", "status-block"]) {
     const btn = $(id);
     if (!btn) continue;
-    btn.textContent = b ? "Unblock agents…" : "Block all agents…";
+    btn.textContent = b ? "Unblock agents" : "Block all agents";
     if (id === "block-agents-menu") btn.classList.toggle("danger-text", !b);
     else btn.classList.toggle("danger-ghost", !b);
   }
@@ -1521,12 +1525,12 @@ function openAwsDialog(profile = "", existing = null) {
 
 const NEW_PORTAL = "__new__";
 
-// Portal dropdown: every configured portal (with sign-in state), plus "New portal…".
+// Portal dropdown: every configured portal (with sign-in state), plus "New portal".
 function renderPortalOptions(selected) {
   const sel = $("aws-portal");
   const opts = ssoPortals.map((p) => el("option", { value: p.portal,
     textContent: `${p.portal} · ${p.start_url.replace(/^https:\/\//, "")} (${p.region})${p.logged_in ? "" : " · signed out"}` }));
-  sel.replaceChildren(el("option", { value: "", textContent: "Choose a portal…", disabled: true }), ...opts, el("option", { value: NEW_PORTAL, textContent: "+ New portal…" }));
+  sel.replaceChildren(el("option", { value: "", textContent: "Choose a portal…", disabled: true }), ...opts, el("option", { value: NEW_PORTAL, textContent: "+ New portal" }));
   const keep = selected && ssoPortals.some((p) => p.portal === selected);
   sel.value = keep ? selected : (ssoPortals[0]?.portal ?? NEW_PORTAL);
 }
@@ -1627,7 +1631,7 @@ function renderAwsDetail(s) {
   let kind, sub, state = "";
   if (m && m.sso) {
     kind = `AWS SSO · portal ${m.portal}`;
-    sub = `Account ${m.account} · role ${m.role} · region ${m.region}`;
+    sub = `Account ${awsAccountText(m.portal, m.account)} · role ${m.role} · region ${m.region}`;
   } else if (m && !m.error) {
     kind = `Access keys (${m.temporary ? "temporary" : "long-term"})`;
     sub = [m.region, m.key].filter(Boolean).join(" · ");
@@ -1652,7 +1656,7 @@ function renderAwsDetail(s) {
   $("aws-detail-kind").textContent = kind;
   $("aws-detail-sub").textContent = sub;
   const fields = m && !m.error ? (m.sso
-    ? [["Portal", m.portal], ["Account", String(m.account).replace(/^(\d{4})(\d{4})(\d{4})$/, "$1 $2 $3")], ["Role", m.role], ["Region", m.region]]
+    ? [["Portal", m.portal], ["Account", awsAccountText(m.portal, m.account)], ["Role", m.role], ["Region", m.region]]
     : [["Key type", m.temporary ? "Temporary" : "Long-term"], ["Key ID", m.key], ["Region", m.region]]) : [];
   $("aws-detail-kv").replaceChildren(...fields.filter(([, value]) => value).flatMap(([label, value]) => [el("dt", { textContent: label }), el("dd", { textContent: value })]));
   $("aws-detail-kv").hidden = !fields.length;
@@ -1720,6 +1724,7 @@ async function refreshSso() {
     ssoPortals = st.portals || [];
     ssoRegistered = st.registered || {};
   } catch { return; /* keep the last known state */ }
+  if (awsDetailTarget) renderAwsDetail(awsDetailTarget); // stored account names may have just loaded
   // A sign-in that ended by itself (AWS stopped renewing it, or its limit passed): say so once.
   const first = ssoEndedSeen === null;
   ssoEndedSeen = ssoEndedSeen || new Map();
@@ -1736,7 +1741,6 @@ async function loadSsoStatus() {
   await refreshSso();
   renderSsoBanner();
   renderAwsPage();
-  if (awsDetailTarget) renderAwsDetail(awsDetailTarget);
 }
 
 // Sign-in limits, in minutes (null = as long as AWS allows). AWS's own session
@@ -2404,7 +2408,7 @@ function attentionItems(d) {
   const s = d.status || {}, items = [], ok = [];
   const b = blockedState();
   if (b) items.push(["bad", b.all ? "All agents are blocked." : `${blockedWho(b)}.`, " Every agent request is refused.",
-    el("button", { type: "button", class: "btn sm", textContent: "Unblock…", onclick: () => setBlocked(false, b) })]);
+    el("button", { type: "button", class: "btn sm", textContent: "Unblock", onclick: () => setBlocked(false, b) })]);
   for (const p of ssoPortals.filter((x) => !x.logged_in)) {
     const names = portalProfiles(p.portal);
     const what = names.length ? (names.length <= 2 ? names.join(" and ") : `${names.length} profiles`) : "its profiles";
@@ -2647,7 +2651,7 @@ function renderBackupSettings() {
     ? `Set up · ${total - unbacked.length} of ${plural(total, "secret")} ${total === 1 ? "has" : "have"} a backup copy`
     : "Not set up: if this Mac's keys are lost, every secret is unrecoverable.";
   $("backup-verify-open").hidden = !has;
-  $("backup-rotate-open").textContent = has ? "New paper key…" : "Make a paper backup…";
+  $("backup-rotate-open").textContent = has ? "New paper key" : "Make a paper backup";
   $("backup-rotate-open").classList.toggle("primary", !has);
   const row = $("backup-missing-row");
   row.hidden = !has || unbacked.length === 0;
@@ -2686,7 +2690,7 @@ function profileRow(p) {
     el("span", { class: "t2" }, el("span", { class: "mono", style: "font-size:13px", textContent: tildePath(p.path), title: p.path }), el("small", { textContent: sub })),
     el("span", { class: `pill2 ${pill}`, textContent: state }));
   if (p.state === "changed" && profileReview?.key !== p.path) {
-    row.append(el("button", { type: "button", class: "btn sm", textContent: "Review…", onclick: () => reviewProfile(p.path, p.sha256) }));
+    row.append(el("button", { type: "button", class: "btn sm", textContent: "Review", onclick: () => reviewProfile(p.path, p.sha256) }));
   }
   return row;
 }
@@ -3132,7 +3136,7 @@ function renderInspector() {
   if (isAws(s.name)) { panel.append(aws); renderAwsDetail(s); }
   else {
     const copy = el("button", { class: "btn primary", textContent: "Copy", onclick: () => copyValue(s.name, copy) });
-    const edit = el("button", { class: "btn", textContent: "Edit…", "aria-label": `Edit ${s.name}`, onclick: () => openEdit(s) });
+    const edit = el("button", { class: "btn", textContent: "Edit", "aria-label": `Edit ${s.name}`, onclick: () => openEdit(s) });
     panel.append(el("h3", { class: "sec", textContent: "Value" }),
       el("div", { class: "panel-value" }, el("code", { id: "inspector-value", textContent: s.public ? (publicValues.get(s.name)?.value ?? "Public value · copy to read") : MASK }), edit, copy),
       el("p", { class: "hint", textContent: `Copying never reveals a secret here. Clipboard clears in ${cfg?.clip_seconds ?? 30}s.` }));
@@ -3158,7 +3162,7 @@ function renderInspector() {
     while (leaseHeading.nextElementSibling && !leaseHeading.nextElementSibling.matches("h3, .panel-activity")) leaseBox.append(leaseHeading.nextElementSibling);
     leaseHeading.after(leaseBox);
   }
-  const del = deleteButton(s); del.className = "btn danger-text"; del.append(isAws(s.name) ? "Delete profile…" : "Delete secret…");
+  const del = deleteButton(s); del.className = "btn danger-text"; del.append(isAws(s.name) ? "Delete profile" : "Delete secret");
   panel.append(el("div", { class: "panel-footer" }, del, el("span", { class: "hint", textContent: "Asks for Touch ID" })));
   const heading = panel.firstElementChild;
   const title = heading.firstElementChild;
@@ -3234,7 +3238,7 @@ function renderSourceFolder(rows) {
   rows.append(el("div", { class: "source-page" }, el("h2", { textContent: source.name }), el("span", { class: "tag pub", textContent: source.kind }),
     el("p", { class: "mono", textContent: source.endpoint }),
     el("p", { class: "muted", textContent: "Remote listing is not available. Karambit resolves references when used, not while browsing. Source policy is independent of local-secret access filters." }), form,
-    el("div", { class: "actions" }, el("button", { class: "btn", textContent: "Retarget / update credentials…", onclick: () => openSource(source) }), remove)));
+    el("div", { class: "actions" }, el("button", { class: "btn", textContent: "Retarget / update credentials", onclick: () => openSource(source) }), remove)));
 }
 let editingSource = null;
 async function openSource(source = null) {
@@ -3398,7 +3402,7 @@ $("aws-detail-test").addEventListener("click", async (ev) => {
     const id = await invoke("aws_whoami", { profile });
     out.className = "tsr ok";
     out.replaceChildren(el("span", {}, el("b", { textContent: "Signed in" }), el("br"),
-      el("span", { class: "mono", style: "font-size:12.5px", textContent: `${roleFromArn(String(id.Arn || ""))} · ${groupAccount(id.Account)}`, title: String(id.Arn || "") })));
+      el("span", { class: "mono", style: "font-size:12.5px", textContent: `${roleFromArn(String(id.Arn || ""))} · ${awsAccountText(ssoRegistered[s.name]?.portal || awsPortalFor(s), id.Account)}`, title: String(id.Arn || "") })));
   } catch (err) {
     out.className = "tsr bad";
     out.replaceChildren(el("span", {}, el("b", { textContent: "Couldn’t sign in" }), el("br"), String(err).replace(/^Error:\s*/, "")));
