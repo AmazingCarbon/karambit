@@ -95,6 +95,6 @@ STRIPE_SECRET_KEY=karambit(myapp/STRIPE_SECRET_KEY)
 Supported: `KEY=value`, quotes, multi-line, `${VAR}` / `${VAR:-default}`, `@sensitive`,
 `@required`, `@optional`, `@type=string|number|boolean|url|port|email|enum(...)`,
 `@defaultRequired`, `@docs`. `karambit(ref)` takes any ref `run -e` accepts, including
-a reference to a configured linked source. Other resolver functions (`op()`, `exec()`, ...), `$(...)` and object
+a reference to a configured linked source (this build ships no source connectors, so none can be configured). Other resolver functions (`op()`, `exec()`, ...), `$(...)` and object
 literals are refused, not guessed; other decorators are ignored with a warning.
 

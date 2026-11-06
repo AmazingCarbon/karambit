@@ -28,7 +28,7 @@ The old `--touch`, `--agent`, `--human-only` and `--public` flags still work.
 ```sh
 karambit add stripe/prod-key                     # value via hidden prompt or stdin, never argv
 karambit add dev/db --access agents              # Agents · no prompt
-karambit add bank/pin --access me-touch          # Only me · Touch ID: `karambit run` refuses agents
+karambit add bank/pin --access me-touch          # Only me · Touch ID: `karambit run` refuses agents (unless a folder YOLO is active)
 karambit ls                                      # ACCESS / NAME table, no values
 karambit run -e STRIPE_KEY=stripe/prod-key -- ./deploy.sh
 karambit run -- npm test                         # reads ./.karambit.env, else ./.env.schema (refs only, safe to commit)
@@ -54,8 +54,8 @@ karambit doctor --agent-env [--json]            # what can THIS environment reac
 ## Model
 
 What Karambit does and does not guarantee depends on how a secret is used: **Mode A** (a trusted
-tool receives the value; `run`, `aws <PROFILE>`, today), **Mode B** (sandboxed tool; planned) or **Mode C**
-(broker custody; planned). Agents are not kept from values in Mode A: the tool you launch holds
+tool receives the value; `run`, `aws <PROFILE>`, today), **Mode B** (sandboxed tool; experimental
+`run --jail` only) or **Mode C** (broker custody; fixed `karambit call` tools only). Agents are not kept from values in Mode A: the tool you launch holds
 them. See [docs/threat-model.md](threat-model.md) for the modes, the command-to-mode map and
 the same-user limits.
 
@@ -74,7 +74,7 @@ Here “Touch ID” names (1)'s current presence mechanism, caller/anchor checks
 (2)+(3), and helper/bound-run delivery needs (2)+(3)+(4). Daemon RAM lifetime needs
 (7); lock-ended human cache reuse also needs (8). These are not protection against
 hostile same-user code. Encryption, redaction and audit remain software properties.
-**(6) is not implemented**: current runs are Mode A, not sandboxed. **(5) is partial**:
+**(6) is only an experimental opt-in** (`run --jail`): default runs are Mode A, not sandboxed. **(5) is partial**:
 Concealed/Transient clipboard markers and unchanged-content auto-clear do not
 ensure history exclusion; no `.currentHostOnly` is set, so Universal Clipboard
 exclusion is not guaranteed. Copies already read cannot be recalled. Missing or
@@ -97,7 +97,7 @@ prompt, Agents · Touch ID, Only me · Touch ID, and calls leases "temporary acc
 | Public | open | read it, never redacted | agent |
 | Agents | open | yes, no prompt | agent |
 | Agents + Touch ID | bio | yes, Touch ID each use or a lease | bio |
-| Only me + Touch ID | bio | blocked | bio; after one Touch ID, reused for 3h or until the screen locks |
+| Only me + Touch ID | bio | blocked, except during an approved folder YOLO | bio; after one Touch ID, reused for 3h or until the screen locks |
 
 No-prompt "Only me" is **retired**: `add` and `policy` refuse open tier + agents blocked + not
 public, because a same-user agent can read it anyway (see Limits). Old vaults: run
@@ -158,8 +158,8 @@ karambit daemon status ; karambit daemon stop      # stop = every lease ends
   unanchored callers never create a cache. Tabs in the same app share the anchor, shown in lease ls/audit.
   It ends on revoke, expiry or screen lock (checked every 5s and on each cached use).
 
-- A small per-user daemon (`karambit daemon`, auto-started, exits after 20 idle min) holds leased
-  keys in RAM only. Nothing on disk; restart = all leases gone.
+- A small per-user daemon (`karambit daemon`, auto-started, exits after 20 idle minutes with no leases, YOLOs, human unlock caches, AWS endpoints, SSO sign-ins or pending or live bound launches) holds
+  leased keys in RAM only. Nothing on disk; restart = all leases and YOLOs gone.
 - Caller identity uses capability (2) (`LOCAL_PEERTOKEN` audit token); cwd, ancestry and env inspection use (3). Agent classification still uses heuristic process/env markers.
 - Granting is human-only + one Touch ID. Folder leases cover secrets that exist at grant time only, and replace only the same grantee's lease on each.
 - Blocking agents, turning Touch ID on, overwriting or deleting a secret ends its leases.
@@ -243,7 +243,7 @@ pin mismatch: the old helper cannot render the new approval.
   Raw legacy requests cannot spend command-scoped agent leases: use `karambit run`.
   Before any prompt, the daemon estimates the release size (local secret ciphertext lengths, argv and
   your environment) and refuses a launch over the 1 MB frame or `ARG_MAX` (`launch too large`), so no
-  lease use is spent. Linked-source (backend) values can't be sized up front; they are checked at release only.
+  lease use is spent. Linked-source (backend) values can't be sized up front; they are checked at release only (this build ships no source connectors).
   Independent stored-policy disclosures, unscoped leases and human access retain
   their separate authorization; this is not a blanket agent verb fence.
 
@@ -310,7 +310,7 @@ Secrecy is not safety, and nothing here is a defence against code running as you
   GUI/terminal automation. Set `human-lease-hours 0` to require Touch ID every time.
 - **`karambit doctor --agent-env`** probes the environment it runs in (sibling `ps -E`, `~/.vault-token`
   readability, daemon socket connect (no request sent), writability of audit/config/pins, redaction of a synthetic canary, agent
-  detection) and prints pass / fail / inconclusive / unsupported per row. It never touches real secrets,
+  detection, and whether the Seatbelt jail is available) and prints pass / fail / inconclusive / unsupported per row. It never touches real secrets,
   never starts a daemon and never prints a value. It covers **this run only**; a pass is not a safety
   claim. Its `key-blob-use` row compiles and runs a small Swift probe (needs the Xcode command line
   tools) that creates a **synthetic** no-prompt Secure Enclave key, reloads it from a blob file and

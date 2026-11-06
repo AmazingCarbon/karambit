@@ -166,8 +166,9 @@ Karambit encrypts each secret with its own key (ChaCha20-Poly1305). Secure Encla
 be exported wrap those keys. Touch ID protects unwraps where required; approved temporary access
 can allow use without another prompt. A paper backup key provides a separate recovery path.
 
-The installer uses the macOS hardened runtime to block debugger attachment and `DYLD_*` injection
-into the signed binaries. This does not protect every file or process that runs as you.
+The installer signs the binaries with the macOS hardened runtime. In an earlier macOS 26 check this
+refused a same-user debugger attach and ignored `DYLD_*` injection; it has not been re-run for every
+build. It does not protect every file or process that runs as you.
 
 Keep these limits in mind:
 
@@ -178,7 +179,7 @@ Keep these limits in mind:
   encoded values, files or network traffic. Public values are not redacted. `run --jail` is experimental;
   do not treat it as a security boundary.
 - **Agent detection can be bypassed.** Karambit uses process ancestry, names and environment markers.
-  A caller it detects as an agent cannot get a non-public secret, add or remove secrets, relax a policy
+  A caller it detects as an agent cannot reveal non-public secrets with `get`, add or remove secrets, relax a policy
   or grant access. A caller that evades detection can look like a human. Use Touch ID for important secrets.
 - **No-prompt secrets are readable by programs that run as you.** Encryption at rest does not make
   the Public and Agents levels a barrier against those programs.
@@ -201,7 +202,11 @@ for credentials that can outlive a Karambit grant.
 
 ## Roadmap
 
-- **External secret engines.** Connect your own store without moving every secret into the local vault.
+- **Connect your own secret engine — In development.** Access and manage passwords and secrets
+  from one place while they stay in an engine you own, without moving them into the local vault.
+  Which management actions work depends on that engine's API and your permissions. Backend
+  groundwork exists, but no built-in external-engine connectors ship yet. Writing and rotating
+  secrets in an external engine is planned, not implemented.
 - **Easier installation, if there is enough interest.** Signed and notarized macOS releases, plus Homebrew.
 
 Security fixes, local hardening and external-engine connectors belong in OSS. These are plans, not release dates.

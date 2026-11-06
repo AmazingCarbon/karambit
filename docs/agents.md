@@ -29,7 +29,7 @@ bank/pin	me-touch
 ```
 
 `agents` and `public`: use now. `agents-touch`: needs temporary access from the user.
-`me-touch`: never. `--brief --json` gives `[{"name","access","lease"?}]`.
+`me-touch`: never, unless the user has started a folder YOLO for you. `--brief --json` gives `[{"name","access","lease"?}]`.
 
 A refusal, with `--json` or `KARAMBIT_FORMAT=json` (stderr, one line):
 
