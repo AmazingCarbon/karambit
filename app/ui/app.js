@@ -1825,7 +1825,6 @@ function renderAwsPage() {
   }));
   $("portal-items").replaceChildren(...ssoPortals.map((p) => portalItem(p)));
   $("portals-btn").textContent = `Portals (${ssoPortals.length})`;
-  $("aws-warnings").replaceChildren(...signedOut.map((p) => el("div", { class: "banner warn sso-line" }, el("span", { class: "txt", textContent: `Signed out of ${p.portal}. Agents can’t use its profiles.` }), signInButton(p.portal, `Sign in to ${p.portal}`))));
   const exposure = EXPOSURE.find((x) => x.id === awsExposureFilter);
   const hits = searchSecrets($("aws-filter").value, profiles);
   const shown = profiles.filter((s) => (!exposure || exposure.test(s)) && (!hits || hits.has(s.name)));
@@ -1846,6 +1845,7 @@ function awsPlace(s) {
   if (portal) return { kind: "sso", portal, account, role };
   return { kind: "unknown" };
 }
+let awsSelected = null; // portal key shown beside the rail: "portal:<name>", "keys" or "unknown"
 const awsOpen = new Map(); // group key -> open? (remembered while the app runs)
 function awsGroup(key, defaultOpen, summary, children, cls = "") {
   const open = awsOpen.has(key) ? awsOpen.get(key) : defaultOpen;
@@ -1883,35 +1883,67 @@ function awsTree(shown, hits, signedOut) {
       accounts.get(id).push(s);
     }
   }
-  const out = [];
+  const entries = [];
   const portalNames = [...new Set([...ssoPortals.map((p) => p.portal), ...byPortal.keys()])].filter((n) => byPortal.has(n));
   for (const name of portalNames) {
     const p = ssoPortals.find((x) => x.portal === name), accounts = byPortal.get(name);
     const host = p ? p.start_url.replace(/^https:\/\//, "").replace(/\/.*$/, "") : "portal removed";
     const count = [...accounts.values()].reduce((n, a) => n + a.length, 0);
-    const out2 = signedOut.some((x) => x.portal === name);
-    const accountNodes = [...accounts].sort(([a], [b]) => (p?.accounts?.[a] || a).localeCompare(p?.accounts?.[b] || b)).map(([id, items]) => {
+    const accountNodes = [...accounts].sort(([a], [b]) => (p?.accounts?.[a] || a).localeCompare(p?.accounts?.[b] || b)).map(([id, items], i) => {
       const label = p?.accounts?.[id];
       items.sort((a, b) => (awsPlace(a).role || a.name).localeCompare(awsPlace(b).role || b.name));
       const rows = items.map((s) => awsProfileRow(s, hits, signedOut, label || id));
-      return awsGroup(`acct:${name}:${id}`, filtering || accounts.size === 1, [
+      return awsGroup(`acct:${name}:${id}`, filtering || accounts.size <= 2 || i === 0, [
         el("span", { class: "aws-acct-name", textContent: label || (id === "?" ? "Account after unlock" : groupAccount(id)) }),
         id !== "?" ? el("span", { class: "aws-acct-id mono", textContent: label ? `${groupAccount(id)}` : "" }) : null,
         el("span", { class: "aws-count-pill", textContent: plural(items.length, "role") }),
       ].filter(Boolean), [el("div", { class: "aws-tree-body" }, ...rows)], "aws-account");
     });
-    out.push(awsGroup(`portal:${name}`, true, [
-      el("span", { class: "aws-portal-name", textContent: name }),
-      el("span", { class: "aws-portal-host", textContent: host, title: p?.start_url || "" }),
-      el("span", { class: "aws-count-pill", textContent: `${plural(accounts.size, "account")} · ${plural(count, "role")}` }),
-      out2 ? el("span", { class: "tag warn", textContent: "Signed out" }) : null,
-    ].filter(Boolean), accountNodes, "aws-portal"));
+    entries.push({ key: `portal:${name}`, name, p, host, out: signedOut.some((x) => x.portal === name),
+      sub: `${plural(accounts.size, "account")} · ${plural(count, "role")}`, nodes: accountNodes });
   }
-  if (keys.length) out.push(awsGroup("keys", true, [el("span", { class: "aws-portal-name", textContent: "Access keys" }), el("span", { class: "aws-count-pill", textContent: plural(keys.length, "profile") })],
-    [el("div", { class: "aws-tree-body" }, ...keys.map((s) => awsProfileRow(s, hits, signedOut)))], "aws-portal"));
-  if (unknown.length) out.push(awsGroup("unknown", true, [el("span", { class: "aws-portal-name", textContent: "Not grouped yet" }), el("span", { class: "aws-portal-host", textContent: "Touch ID profiles: sign in or open one to place it" }), el("span", { class: "aws-count-pill", textContent: plural(unknown.length, "profile") })],
-    [el("div", { class: "aws-tree-body" }, ...unknown.map((s) => awsProfileRow(s, hits, signedOut)))], "aws-portal"));
-  return out;
+  if (keys.length) entries.push({ key: "keys", name: "Access keys", host: "Static keys, no portal", sub: plural(keys.length, "profile"),
+    nodes: [el("div", { class: "aws-tree-body" }, ...keys.map((s) => awsProfileRow(s, hits, signedOut)))] });
+  if (unknown.length) entries.push({ key: "unknown", name: "Not grouped yet", host: "Touch ID profiles: sign in or open one to place them", sub: plural(unknown.length, "profile"),
+    nodes: [el("div", { class: "aws-tree-body" }, ...unknown.map((s) => awsProfileRow(s, hits, signedOut)))] });
+  if (!entries.length) return [];
+  // One org on screen at a time: the rail picks it. Keep the pick while it still has rows.
+  if (!entries.some((e) => e.key === awsSelected)) awsSelected = entries[0].key;
+  const cur = entries.find((e) => e.key === awsSelected);
+  const rail = el("nav", { class: "aws-rail", "aria-label": "AWS portals" }, el("h3", { class: "aws-rail-title", textContent: "Portals" }));
+  let otherTitle = false;
+  for (const e of entries) {
+    if (!otherTitle && !e.key.startsWith("portal:")) { rail.append(el("h3", { class: "aws-rail-title", textContent: "Other" })); otherTitle = true; }
+    const b = el("button", { type: "button", class: "aws-rail-item", "aria-current": String(e.key === awsSelected) },
+      el("span", { class: "aws-rail-line" }, el("span", { class: `aws-dot${e.out ? " out" : ""}${e.key.startsWith("portal:") ? "" : " plain"}`, "aria-hidden": "true" }),
+        el("b", { textContent: e.name }), e.out ? el("span", { class: "tag warn", textContent: "Signed out" }) : null),
+      el("small", { textContent: e.sub }));
+    b.addEventListener("click", () => { awsSelected = e.key; renderAwsPage(); });
+    rail.append(b);
+  }
+  const head = el("div", { class: "aws-pane-head" }, el("span", { class: `aws-dot${cur.out ? " out" : ""}${cur.p ? "" : " plain"}`, "aria-hidden": "true" }),
+    el("b", { class: "aws-portal-name", textContent: cur.name }),
+    el("span", { class: "aws-portal-host", textContent: cur.p ? `${cur.host} · ${cur.p.region}` : cur.host, title: cur.p?.start_url || "" }));
+  if (cur.p) {
+    const p = cur.p;
+    head.append(el("span", { class: "aws-pane-state small muted", textContent: p.logged_in ? (p.renew_error ? "Can't renew · retrying" : portalUntil(p)) : "" }));
+    if (p.logged_in) {
+      const imp = el("button", { type: "button", class: "btn sm", textContent: "Import roles", "aria-label": `Import all roles from ${p.portal}` });
+      imp.addEventListener("click", () => openSsoImport(p.portal, imp));
+      const so = el("button", { type: "button", class: "btn sm", textContent: "Sign out", "aria-label": `Sign out of AWS portal ${p.portal}` });
+      so.addEventListener("click", () => signOutPortal(p, so));
+      head.append(imp, so);
+    } else {
+      const si = signInButton(p.portal, `Sign in to AWS portal ${p.portal}`);
+      si.classList.add("primary");
+      head.append(si);
+    }
+  }
+  const pane = el("section", { class: "aws-pane", "aria-label": cur.name }, head);
+  if (cur.out) pane.append(el("div", { class: "aws-pane-note" }, el("span", {
+    textContent: `${cur.p.ended && cur.p.ended.at ? `Signed out ${shortClock(cur.p.ended.at)}. ` : ""}Agents can’t use these profiles until you sign in.` })));
+  pane.append(...cur.nodes);
+  return [rail, pane];
 }
 
 async function signOutPortal(p, action) {

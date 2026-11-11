@@ -931,7 +931,7 @@ input:checked + span .access-radio { border-color: var(--accent); background: va
 #aws-groups .row-name > .small { white-space: nowrap; width: 100%; font-size: 12px; }
 #aws-groups .tile { width: 26px; height: 26px; }
 #aws-groups .when { display: none; }
-#aws-warnings .signin { height: 30px; background: var(--accent); color: var(--on-accent); }
+#aws-groups .signin { height: 30px; background: var(--accent); color: var(--on-accent); }
 .portals-menu { position: relative; margin: 0; }
 .portals-menu > summary { list-style: none; }
 .portals-menu > summary::-webkit-details-marker { display: none; }
@@ -1224,7 +1224,39 @@ mark.hit { background: var(--accent-soft); color: var(--accent-text); border-rad
 .tab-label:has(.tag.beta) { white-space: nowrap; }
 
 /* AWS page tree: portal → account → role, like the AWS access portal. */
-#aws-groups { background: transparent; }
+#aws-groups { background: transparent; display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: var(--s4); align-items: start; }
+/* Rail: one row per portal. Picks which org the page shows. */
+.aws-rail { position: sticky; top: 0; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); padding: var(--s1) 0; }
+.aws-rail-title { margin: var(--s3) var(--s3) var(--s1); font: 600 11px var(--font-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--fg-2); }
+.aws-rail-title:first-child { margin-top: var(--s2); }
+.aws-rail-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: 0; border-left: 3px solid transparent; color: var(--fg); padding: var(--s2) var(--s3); font: inherit; }
+.aws-rail-item:hover { background: var(--hover); }
+.aws-rail-item[aria-current="true"] { background: var(--surface-2); border-left-color: var(--accent); }
+.aws-rail-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.aws-rail-line { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.aws-rail-line b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.aws-rail-item small { margin-left: calc(8px + var(--s2)); color: var(--fg-2); font-size: var(--fs-xs); }
+.aws-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.aws-dot.out { background: var(--warn); }
+.aws-dot.plain { background: var(--fg-2); }
+.aws-pane { background: var(--surface); border: 1px solid var(--line); min-width: 0; }
+.aws-pane-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s3); padding: var(--s3); border-bottom: 1px solid var(--line); }
+.aws-pane-head .aws-portal-host { flex: 1 1 120px; }
+.aws-pane-state { white-space: nowrap; }
+.aws-pane-note { padding: var(--s2) var(--s3); color: var(--warn); background: var(--warn-soft); border-bottom: 1px solid var(--warn-line); font-size: var(--fs-sm); }
+/* With the inspector open there is no room for a side rail: it becomes a strip above the pane. */
+.secrets-body:has(.inspector:not([hidden])) #aws-groups { grid-template-columns: minmax(0, 1fr); }
+.secrets-body:has(.inspector:not([hidden])) .aws-rail { position: static; flex-direction: row; overflow-x: auto; padding: 0; }
+.secrets-body:has(.inspector:not([hidden])) .aws-rail-title { display: none; }
+.secrets-body:has(.inspector:not([hidden])) .aws-rail-item { width: auto; flex: none; max-width: 220px; border-left: 0; border-bottom: 3px solid transparent; }
+.secrets-body:has(.inspector:not([hidden])) .aws-rail-item[aria-current="true"] { border-bottom-color: var(--accent); }
+@media (max-width: 900px) {
+  #aws-groups { grid-template-columns: minmax(0, 1fr); }
+  .aws-rail { position: static; flex-direction: row; overflow-x: auto; padding: 0; }
+  .aws-rail-title { display: none; }
+  .aws-rail-item { width: auto; flex: none; max-width: 220px; border-left: 0; border-bottom: 3px solid transparent; }
+  .aws-rail-item[aria-current="true"] { border-bottom-color: var(--accent); }
+}
 .aws-tree > summary { display: flex; align-items: center; gap: var(--s2); list-style: none; cursor: pointer; min-height: 44px; padding: var(--s2) var(--s3); }
 .aws-tree > summary::-webkit-details-marker { display: none; }
 .aws-tree > summary::before { content: '›'; color: var(--fg-2); width: 12px; flex: none; transition: transform var(--t-fast); }
@@ -1243,7 +1275,7 @@ mark.hit { background: var(--accent-soft); color: var(--accent-text); border-rad
 .aws-acct-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aws-acct-id { color: var(--fg-2); font-size: var(--fs-xs); letter-spacing: .02em; flex: none; }
 .aws-tree-body .secret-row { padding-left: calc(var(--s3) + 32px); }
-.aws-portal > .aws-tree-body .secret-row { padding-left: calc(var(--s3) + 14px); }
+.aws-portal > .aws-tree-body .secret-row, .aws-pane > .aws-tree-body .secret-row { padding-left: calc(var(--s3) + 14px); }
 .aws-tree-body .secret-row + .secret-row { border-top: 1px solid var(--line); }
 .aws-tree > summary::before { content: ''; width: 7px; height: 7px; margin: 0 4px 0 2px; border-right: 2px solid var(--fg-2); border-bottom: 2px solid var(--fg-2); transform: rotate(-45deg); }
 .aws-tree[open] > summary::before { transform: rotate(45deg); }
