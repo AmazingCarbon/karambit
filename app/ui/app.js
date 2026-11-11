@@ -11,6 +11,7 @@ let secrets = [];
 let yoloError = "";
 let yolos = {}; // folder path -> one active record per grantee, with verified covered names
 let cfg = null;
+let appInitialized = false; // live metadata polling waits until setup is complete
 
 // ---------- helpers ----------
 
@@ -97,6 +98,7 @@ const CMD_FAIL_TITLE = {
 
 // IPC with the triggering control disabled (Touch ID prompts can take a while).
 async function call(cmd, args = {}, ctl = null) {
+  if (METADATA_MUTATING_COMMANDS.has(cmd)) invalidateSecretMetadata();
   if (ctl) ctl.disabled = true;
   try {
     return await invoke(cmd, args);
@@ -230,17 +232,254 @@ async function fixLockKeys() {
   loadSecrets();
 }
 
+// ---------- live metadata refresh ----------
+// The CLI can add, remove, rename or repolicy secrets while the app is open. Poll only
+// the cheap list metadata in the foreground and redraw what changed; the slower SSO/YOLO
+// runtime refresh below stays separate. Never call loadSecrets() from the poller.
+
+const METADATA_POLL_MS = 2000;
+const METADATA_RETRY_MAX_MS = 30000;
+const METADATA_MUTATING_COMMANDS = new Set([
+  "add", "remove", "rename", "set_policy", "recover", "keys_upgrade", "block_agents",
+  "yolo_start", "yolo_end", "lease_grant", "lease_revoke", "lease_revoke_all",
+  "aws_add", "aws_add_sso", "aws_remove", "source_add", "source_retarget", "source_remove",
+  "init", "set_config", "sso_portal_add", "sso_portal_remove", "sso_portal_limit",
+  "sso_logout", "paper_confirm", "profile_trust",
+]);
+
+let metadataTimer = null;
+let metadataRun = null;
+let metadataPending = false;
+let metadataRequestSeq = 0;
+let metadataAppliedSeq = 0;
+let metadataGeneration = 0;
+let metadataFailures = 0;
+let lastMetadataSignature = null;
+
+// Expiry, identity and policy matter. Lease remaining counts down without any change a
+// redraw could show usefully, so it must not make every poll look different.
+function secretMetadataEntryKey(s) {
+  return JSON.stringify({
+    name: s.name, tier: s.tier, agent_allowed: s.agent_allowed, public: s.public,
+    has_backup: s.has_backup, created: s.created, updated: s.updated,
+    leases: (s.leases || []).map((l) => JSON.stringify({
+      to: l.to, to_label: l.to_label, granted: l.granted, expires: l.expires,
+      by: l.by, uses: l.uses, yolo: !!l.yolo, scope: l.scope,
+    })).sort(),
+  });
+}
+function secretMetadataSignature(list) {
+  return (list || []).map(secretMetadataEntryKey).sort().join("\n");
+}
+function changedSecretNames(before, after) {
+  const old = new Map((before || []).map((s) => [s.name, secretMetadataEntryKey(s)]));
+  const next = new Map((after || []).map((s) => [s.name, secretMetadataEntryKey(s)]));
+  const changed = new Set();
+  for (const [name, key] of old) if (!next.has(name) || next.get(name) !== key) changed.add(name);
+  for (const name of next.keys()) if (!old.has(name)) changed.add(name);
+  return changed;
+}
+
+function invalidateSecretMetadata() { metadataGeneration += 1; }
+function beginMetadataRequest() { return { seq: ++metadataRequestSeq, generation: metadataGeneration }; }
+const metadataMayApply = (req) => req.seq > metadataAppliedSeq && req.generation === metadataGeneration;
+
+function metadataActive() {
+  return appInitialized && !document.hidden && $("view-init").hidden;
+}
+
+function setMetadataStale(on) {
+  const n = $("metadata-stale");
+  if (n) n.hidden = !on;
+}
+
+function metadataRetryDelay() {
+  return Math.min(METADATA_POLL_MS * 2 ** Math.max(0, metadataFailures - 1), METADATA_RETRY_MAX_MS);
+}
+
+// A replacement render rebuilds rows and the inspector; keep the user's place when the
+// data, not the user, changed the list.
+function captureRefreshFocus() {
+  const a = document.activeElement;
+  if (!a || a === document.body) return null;
+  const attr = (name) => (typeof a.getAttribute === "function" ? a.getAttribute(name) : "");
+  return {
+    tag: a.tagName, id: a.id || "", aria: attr("aria-label"), exposure: attr("data-exposure"),
+    type: a.type || "", value: a.value ?? "", checked: !!a.checked, text: (a.textContent || "").trim(),
+    container: (typeof a.closest === "function" ? a.closest("[id]")?.id : "") || "",
+  };
+}
+function restoreRefreshFocus(key) {
+  if (!key) return;
+  const a = document.activeElement;
+  if (a && a !== document.body) return; // it survived the render (e.g. the filter input)
+  let target = key.id ? document.getElementById(key.id) : null;
+  if (!target) {
+    const scope = key.container ? document.getElementById(key.container) : null;
+    const matches = [...(scope || document).querySelectorAll(key.tag)].filter((n) => {
+      if (key.aria && n.getAttribute("aria-label") !== key.aria) return false;
+      if (key.exposure && n.getAttribute("data-exposure") !== key.exposure) return false;
+      if (key.type && n.type !== key.type) return false;
+      if (key.value && n.value !== key.value) return false;
+      if (key.text && (n.textContent || "").trim() !== key.text) return false;
+      return true;
+    });
+    target = (key.checked && matches.find((n) => n.checked)) || matches[0];
+  }
+  if (target && typeof target.focus === "function") target.focus();
+}
+function captureRefreshView() {
+  const lists = [$("rows")?.closest?.(".folder-list"), $("aws-groups")?.closest?.(".folder-list")].filter(Boolean);
+  return {
+    focus: captureRefreshFocus(),
+    scroll: lists.map((n) => [n, n.scrollTop || 0]),
+    panel: $("inspector")?.querySelector?.(".panel-body") || null,
+    panelScroll: $("inspector")?.querySelector?.(".panel-body")?.scrollTop || 0,
+  };
+}
+function restoreRefreshView(view) {
+  for (const [node, top] of view.scroll) if (node?.isConnected !== false) node.scrollTop = top;
+  const panel = $("inspector")?.querySelector?.(".panel-body");
+  if (panel && view.panel) panel.scrollTop = view.panelScroll;
+  restoreRefreshFocus(view.focus);
+}
+
+// Poll responses only update metadata. Public values and AWS details need explicit,
+// audited reads, so a background render must not start them.
+function fetchSecondaryMetadata(shown, options = {}) {
+  if (options.background) return;
+  fetchPublicValues(shown);
+  fetchAwsMeta(shown);
+}
+function fetchAwsPageMetadata(profiles, options = {}) {
+  if (options.background) return;
+  fetchAwsMeta(profiles);
+}
+
+function applySecretMetadata(list, req) {
+  const changed = changedSecretNames(secrets, list);
+  const selectedBefore = selectedSecret;
+  const view = captureRefreshView();
+  metadataAppliedSeq = req.seq;
+  lastMetadataSignature = secretMetadataSignature(list);
+  secrets = list;
+  if (selectedSecret && !secrets.some((s) => s.name === selectedSecret)) selectedSecret = null;
+  renderLists({ background: true });
+  // Only touch the inspector when it shows something this update changed. Leaving an
+  // unchanged panel alone also leaves any focused access choice and draft alone.
+  if (selectedBefore && (selectedSecret === null || changed.has(selectedBefore))) renderInspector({ background: true });
+  if (detail && $("detail-dialog").open) {
+    const names = detailTargets().map((s) => s.name);
+    const affected = names.length === 0 || names.some((n) => changed.has(n))
+      || (detail.kind === "folder" && [...changed].some((n) => n === detail.name || n.startsWith(detail.name + "/")));
+    // Metadata only: no activity read, no draft rebuild. A vanished target closes.
+    if (affected) Promise.resolve(renderDetail({ metadataOnly: true })).catch(() => {});
+  }
+  restoreRefreshView(view);
+}
+
+async function fetchSecretMetadataOnce() {
+  const req = beginMetadataRequest();
+  let list;
+  try {
+    list = await invoke("list");
+    if (!Array.isArray(list)) throw new Error("list did not return an array");
+  } catch {
+    metadataFailures += 1;
+    setMetadataStale(true); // keep the last good list and redraw nothing
+    return false;
+  }
+  if (!metadataMayApply(req)) return false; // a newer read or an app mutation owns the state
+  metadataFailures = 0;
+  setMetadataStale(false);
+  const signature = secretMetadataSignature(list);
+  if (signature === lastMetadataSignature) {
+    metadataAppliedSeq = req.seq;
+    return false; // compare before render: unchanged metadata must not rebuild the list
+  }
+  applySecretMetadata(list, req);
+  return true;
+}
+
+function requestSecretMetadata() {
+  if (!metadataActive()) return Promise.resolve(false);
+  if (metadataRun) { metadataPending = true; return metadataRun; }
+  metadataRun = (async () => {
+    let changed = false;
+    try {
+      do {
+        metadataPending = false;
+        changed = (await fetchSecretMetadataOnce()) || changed;
+      } while (metadataPending && metadataActive());
+    } catch {
+      metadataFailures += 1;
+      setMetadataStale(true);
+    }
+    return changed;
+  })().finally(() => { metadataRun = null; });
+  return metadataRun;
+}
+
+function stopSecretMetadataPolling() {
+  clearTimeout(metadataTimer);
+  metadataTimer = null;
+}
+
+function scheduleSecretMetadataPoll(delay = METADATA_POLL_MS) {
+  stopSecretMetadataPolling();
+  if (!metadataActive()) return;
+  metadataTimer = setTimeout(() => {
+    metadataTimer = null;
+    runSecretMetadataPoll().catch(() => {});
+  }, delay);
+}
+
+async function runSecretMetadataPoll() {
+  if (!metadataActive()) return;
+  await requestSecretMetadata().catch(() => { setMetadataStale(true); });
+  if (!metadataActive()) return;
+  // Failures back off 2s, 4s, 8s ... capped, so a broken backend cannot become a busy loop.
+  scheduleSecretMetadataPoll(metadataFailures ? metadataRetryDelay() : METADATA_POLL_MS);
+}
+
+function startSecretMetadataPolling() {
+  if (!metadataActive()) { stopSecretMetadataPolling(); return; }
+  scheduleSecretMetadataPoll(METADATA_POLL_MS);
+}
+
+function resumeSecretMetadata() {
+  if (!metadataActive()) { stopSecretMetadataPolling(); return Promise.resolve(false); }
+  stopSecretMetadataPolling();
+  metadataFailures = 0; // a focus or visibility return is a fresh, immediate attempt
+  return runSecretMetadataPoll().catch(() => false);
+}
+function handleSecretMetadataFocus() { return resumeSecretMetadata(); }
+function handleSecretMetadataVisibility() {
+  if (document.hidden || !metadataActive()) { stopSecretMetadataPolling(); return Promise.resolve(false); }
+  return resumeSecretMetadata();
+}
+
 // ---------- secrets ----------
 
 async function loadSecrets() {
+  // A full load supersedes any poll that started before it (including app mutations).
+  invalidateSecretMetadata();
+  const req = beginMetadataRequest();
   const [list, sourceResult] = await Promise.all([call("list"), sourceKinds.length ? call("source_list") : { sources: [] }, refreshSso()]);
   sources = sourceResult.sources || [];
-  secrets = list;
+  if (metadataMayApply(req)) {
+    secrets = list;
+    metadataAppliedSeq = req.seq;
+    lastMetadataSignature = secretMetadataSignature(list);
+  }
+  metadataFailures = 0;
+  setMetadataStale(false);
   await loadYolos();
   renderLists();
   renderInspector();
   if (awsDetailTarget) renderAwsDetail(secrets.find((s) => s.name === awsDetailTarget.name) || null);
 }
+
 
 // ---------- access levels ----------
 
@@ -659,9 +898,10 @@ function wholeRow(row, open) {
 }
 
 function renderLists() {
-  renderSecrets();
+  const options = arguments[0] || {};
+  renderSecrets(options);
   renderYoloBanner();
-  renderAwsPage();
+  renderAwsPage(options);
   if (currentView === "sources") renderSources();
 }
 
@@ -843,7 +1083,7 @@ function markRow(row, s, label, hit) {
 }
 const byScore = (hits) => (a, b) => (hits.get(b.name)?.score ?? 0) - (hits.get(a.name)?.score ?? 0) || a.name.localeCompare(b.name);
 
-function renderSecrets() {
+function renderSecrets(options = {}) {
   const q = $("filter").value;
   const rows = $("rows");
   rows.replaceChildren();
@@ -899,8 +1139,7 @@ function renderSecrets() {
     textContent: `${plural(elsewhere, "more match", "more matches")} in other folders · Show`, onclick: () => { navigateFolder(); $("filter").focus(); } }));
   $("count").textContent = (hits || exposure) ? `Filtered: ${contents.filter(match).length} of ${plural(contents.length, "item")}`
     : groups.size > 0 && contents.length > 0 ? `${plural(groups.size, "folder")} · ${plural(contents.length, "item")}` : plural(contents.length, "item");
-  fetchPublicValues(shown);
-  fetchAwsMeta(shown);
+  fetchSecondaryMetadata(shown, options);
   $("empty").hidden = rows.childElementCount > 0;
   $("empty-text").textContent = secrets.length ? "Nothing matches the filter." : "Your folders will live here";
   $("empty-hint").hidden = secrets.length > 0;
@@ -1272,7 +1511,7 @@ function syncLeaseControls() {
   $("lease-touch-note").textContent = "Touch ID is asked once to confirm. ";
 }
 
-async function renderDetail({ initializeGrantees = false } = {}) {
+async function renderDetail({ initializeGrantees = false, metadataOnly = false } = {}) {
   const d = detail;
   if (!d) return;
   const items = detailTargets();
@@ -1306,6 +1545,10 @@ async function renderDetail({ initializeGrantees = false } = {}) {
   $("lease-require-touch").hidden = !noPrompt;
   syncDetailPrimary();
   syncLeaseControls();
+
+  // Live metadata polling refreshes names, counts, access and temporary access here,
+  // but never reads activity or rebuilds editable draft controls.
+  if (metadataOnly) return;
 
   // Activity: per secret, or merged across the folder.
   const names = isFolder ? items.map((s) => s.name) : [d.name];
@@ -1613,14 +1856,14 @@ async function afterAwsSave() {
 
 let awsDetailTarget = null; // the secret meta shown in the AWS section
 
-function renderAwsDetail(s) {
+function renderAwsDetail(s, options = {}) {
   const box = $("aws-detail");
   awsDetailTarget = s && isAws(s.name) ? s : null;
   box.hidden = !awsDetailTarget;
   if (!awsDetailTarget) return;
   const profile = s.name.slice(4);
   const m = freshMeta(s);
-  if (!m && s.tier !== "bio") fetchAwsMeta([s]);
+  if (!m && s.tier !== "bio" && !options.background) fetchAwsMeta([s]);
   $("aws-detail-cmd").textContent = `karambit aws ${profile} -- aws sts get-caller-identity`;
   $("aws-detail-default").setAttribute("aria-checked", String(cfg?.default_profile === profile));
   if ($("aws-detail-test-result").dataset.profile !== profile) {
@@ -1641,7 +1884,7 @@ function renderAwsDetail(s) {
     sub = "Show details asks for Touch ID once.";
   } else {
     kind = "AWS profile";
-    sub = m && m.error ? "Couldn't read its details." : "Loading…";
+    sub = m && m.error ? "Couldn't read its details." : options.background ? "Open details to refresh its AWS details." : "Loading…";
   }
   const p = ssoPortals.find((x) => x.portal === awsPortalFor(s));
   const active = !!(p && p.logged_in && p.profiles.includes(s.name));
@@ -1807,7 +2050,7 @@ function awsPortalFor(s) {
   return known?.updated === s.updated ? known.portal : null;
 }
 let awsExposureFilter = null;
-function renderAwsPage() {
+function renderAwsPage(options = {}) {
   const profiles = secrets.filter((s) => isAws(s.name));
   for (const p of ssoPortals) for (const name of p.profiles) {
     const s = profiles.find((s) => s.name === name);
@@ -1825,14 +2068,17 @@ function renderAwsPage() {
   }));
   $("portal-items").replaceChildren(...ssoPortals.map((p) => portalItem(p)));
   $("portals-btn").textContent = `Portals (${ssoPortals.length})`;
-  $("aws-warnings").replaceChildren(...signedOut.map((p) => el("div", { class: "banner warn sso-line" }, el("span", { class: "txt", textContent: `Signed out of ${p.portal}. Agents can’t use its profiles.` }), signInButton(p.portal, `Sign in to ${p.portal}`))));
   const exposure = EXPOSURE.find((x) => x.id === awsExposureFilter);
   const hits = searchSecrets($("aws-filter").value, profiles);
   const shown = profiles.filter((s) => (!exposure || exposure.test(s)) && (!hits || hits.has(s.name)));
   if (hits) shown.sort(byScore(hits));
-  $("aws-groups").replaceChildren(...awsTree(shown, hits, signedOut));
-  $("aws-empty").hidden = shown.length > 0;
-  fetchAwsMeta(profiles);
+  const groups = $("aws-groups");
+  const active = document.activeElement;
+  const railKey = active && groups.contains(active) && active.classList.contains("aws-rail-item") ? active.dataset.key : null;
+  groups.replaceChildren(...awsTree(profiles, shown, hits, signedOut));
+  if (railKey) [...groups.querySelectorAll(".aws-rail-item")].find((n) => n.dataset.key === railKey)?.focus();
+  $("aws-empty").hidden = profiles.length > 0;
+  fetchAwsPageMetadata(profiles, options);
 }
 
 // ---------- AWS page tree: portal → account → role (like the AWS access portal) ----------
@@ -1846,6 +2092,7 @@ function awsPlace(s) {
   if (portal) return { kind: "sso", portal, account, role };
   return { kind: "unknown" };
 }
+let awsSelected = null; // portal key shown beside the rail: "portal:<name>", "keys" or "unknown"
 const awsOpen = new Map(); // group key -> open? (remembered while the app runs)
 function awsGroup(key, defaultOpen, summary, children, cls = "") {
   const open = awsOpen.has(key) ? awsOpen.get(key) : defaultOpen;
@@ -1854,25 +2101,36 @@ function awsGroup(key, defaultOpen, summary, children, cls = "") {
   d.append(el("summary", {}, ...summary), ...children);
   return d;
 }
-function awsProfileRow(s, hits, signedOut, label) {
-  const m = freshMeta(s), place = awsPlace(s);
-  const row = secretRow(s, s.name.slice(4));
-  const sub = place.kind === "keys" ? `Access keys · ${m.region || "default region"}`
-    : place.kind === "sso" ? (place.role ? label : "account after unlock")
-    : "Touch ID profile · details after unlock";
-  const nameNodes = () => highlightNodes(s.name.slice(4), hits?.get(s.name) ? KarambitSearch.shift(hits.get(s.name).ranges, 4, s.name.length - 4) : []);
-  const small = row.querySelector(".row-name > .small"), leaf = row.querySelector(".leaf");
-  // SSO roles read like the AWS portal (role first); the profile name you type is underneath.
-  if (place.kind === "sso" && place.role) { leaf.replaceChildren(document.createTextNode(place.role)); small.replaceChildren(...nameNodes()); small.classList.add("mono"); }
-  else { leaf.replaceChildren(...nameNodes()); small.textContent = sub; }
-  leaf.setAttribute("aria-label", `Details for ${s.name}`);
-  // "Signed out" lives on the portal header, not on every role under it.
-  return row;
+// Short access labels for the compact AWS rows (same words as the AWS filter chips).
+const AWS_LEVEL = { public: ["Public", "a"], agents: ["No prompt", "a"], "agents-touch": ["Touch ID", "t"], me: ["Only me", "m"], "me-touch": ["Only me", "m"] };
+// "2 no prompt · 1 Touch ID" for an account header.
+function awsLevelText(items) {
+  const n = { a: 0, t: 0, m: 0 };
+  for (const s of items) n[AWS_LEVEL[accessOf(s)][1]] += 1;
+  return [["a", "no prompt"], ["t", "Touch ID"], ["m", "only me"]].filter(([k]) => n[k]).map(([k, w]) => `${n[k]} ${w}`).join(" · ");
 }
-function awsTree(shown, hits, signedOut) {
+// One compact row: role, profile name, access, chevron. Like the AWS access portal.
+function awsProfileRow(s, hits, dim = false) {
+  const m = freshMeta(s), place = awsPlace(s), id = accessOf(s), [lvl, cls] = AWS_LEVEL[id];
+  const nameNodes = () => highlightNodes(s.name.slice(4), hits?.get(s.name) ? KarambitSearch.shift(hits.get(s.name).ranges, 4, s.name.length - 4) : []);
+  const role = place.kind === "sso" && place.role;
+  const sub = place.kind === "keys" ? `Access keys · ${m?.region || "default region"}`
+    : place.kind === "sso" ? "Role after unlock" : "Touch ID profile · details after unlock";
+  const b = el("button", { type: "button", class: "aws-role leaf link", "aria-label": role ? `${place.role}, details for ${s.name}` : `Details for ${s.name}`, onclick: () => openDetail(s.name) },
+      ...(role ? [document.createTextNode(place.role)] : nameNodes()));
+  b.dataset.secret = s.name;
+  const row = el("div", { class: `aws-role-row${selectedSecret === s.name ? " selected" : ""}${dim ? " dim" : ""}` },
+    b,
+    el("span", { class: "aws-role-profile" }, el("span", { class: role ? "mono" : "" }, ...(role ? nameNodes() : [document.createTextNode(sub)])), tagLine(s)),
+    el("span", { class: `aws-lv ${cls}`, title: `Access: ${accessLevel(id).label}`, textContent: lvl }),
+    el("span", { class: "aws-go", "aria-hidden": "true", textContent: "›" }));
+  return wholeRow(row, () => openDetail(s.name));
+}
+function awsTree(profiles, shown, hits, signedOut) {
   const filtering = !!hits || !!awsExposureFilter;
+  const visible = new Set(shown.map((s) => s.name));
   const byPortal = new Map(), keys = [], unknown = [];
-  for (const s of shown) {
+  for (const s of profiles) {
     const place = awsPlace(s);
     if (place.kind === "keys") keys.push(s);
     else if (place.kind === "unknown") unknown.push(s);
@@ -1883,35 +2141,75 @@ function awsTree(shown, hits, signedOut) {
       accounts.get(id).push(s);
     }
   }
-  const out = [];
+  const entries = [];
   const portalNames = [...new Set([...ssoPortals.map((p) => p.portal), ...byPortal.keys()])].filter((n) => byPortal.has(n));
   for (const name of portalNames) {
     const p = ssoPortals.find((x) => x.portal === name), accounts = byPortal.get(name);
     const host = p ? p.start_url.replace(/^https:\/\//, "").replace(/\/.*$/, "") : "portal removed";
     const count = [...accounts.values()].reduce((n, a) => n + a.length, 0);
-    const out2 = signedOut.some((x) => x.portal === name);
-    const accountNodes = [...accounts].sort(([a], [b]) => (p?.accounts?.[a] || a).localeCompare(p?.accounts?.[b] || b)).map(([id, items]) => {
+    const dim = signedOut.some((x) => x.portal === name);
+    const accountNodes = [...accounts].sort(([a], [b]) => (p?.accounts?.[a] || a).localeCompare(p?.accounts?.[b] || b)).map(([id, items], i) => {
       const label = p?.accounts?.[id];
-      items.sort((a, b) => (awsPlace(a).role || a.name).localeCompare(awsPlace(b).role || b.name));
-      const rows = items.map((s) => awsProfileRow(s, hits, signedOut, label || id));
-      return awsGroup(`acct:${name}:${id}`, filtering || accounts.size === 1, [
+      const rows = items.filter((s) => visible.has(s.name));
+      if (!rows.length) return null;
+      rows.sort((a, b) => (awsPlace(a).role || a.name).localeCompare(awsPlace(b).role || b.name));
+      return awsGroup(`acct:${name}:${id}`, filtering || accounts.size <= 2 || i === 0, [
         el("span", { class: "aws-acct-name", textContent: label || (id === "?" ? "Account after unlock" : groupAccount(id)) }),
-        id !== "?" ? el("span", { class: "aws-acct-id mono", textContent: label ? `${groupAccount(id)}` : "" }) : null,
-        el("span", { class: "aws-count-pill", textContent: plural(items.length, "role") }),
-      ].filter(Boolean), [el("div", { class: "aws-tree-body" }, ...rows)], "aws-account");
-    });
-    out.push(awsGroup(`portal:${name}`, true, [
-      el("span", { class: "aws-portal-name", textContent: name }),
-      el("span", { class: "aws-portal-host", textContent: host, title: p?.start_url || "" }),
-      el("span", { class: "aws-count-pill", textContent: `${plural(accounts.size, "account")} · ${plural(count, "role")}` }),
-      out2 ? el("span", { class: "tag warn", textContent: "Signed out" }) : null,
-    ].filter(Boolean), accountNodes, "aws-portal"));
+        label && id !== "?" ? el("span", { class: "aws-acct-id mono", textContent: groupAccount(id) }) : null,
+        el("span", { class: "aws-acct-levels", textContent: awsLevelText(rows) }),
+        el("span", { class: "aws-count-pill", textContent: plural(rows.length, "role") }),
+      ].filter(Boolean), [el("div", { class: "aws-tree-body" }, ...rows.map((s) => awsProfileRow(s, hits, dim)))], "aws-account");
+    }).filter(Boolean);
+    entries.push({ key: `portal:${name}`, name, p, host, out: dim,
+      count, sub: `${plural(accounts.size, "account")} · ${plural(count, "role")}`, nodes: accountNodes });
   }
-  if (keys.length) out.push(awsGroup("keys", true, [el("span", { class: "aws-portal-name", textContent: "Access keys" }), el("span", { class: "aws-count-pill", textContent: plural(keys.length, "profile") })],
-    [el("div", { class: "aws-tree-body" }, ...keys.map((s) => awsProfileRow(s, hits, signedOut)))], "aws-portal"));
-  if (unknown.length) out.push(awsGroup("unknown", true, [el("span", { class: "aws-portal-name", textContent: "Not grouped yet" }), el("span", { class: "aws-portal-host", textContent: "Touch ID profiles: sign in or open one to place it" }), el("span", { class: "aws-count-pill", textContent: plural(unknown.length, "profile") })],
-    [el("div", { class: "aws-tree-body" }, ...unknown.map((s) => awsProfileRow(s, hits, signedOut)))], "aws-portal"));
-  return out;
+  const keyRows = keys.filter((s) => visible.has(s.name));
+  if (keys.length) entries.push({ key: "keys", name: "Access keys", host: "Static keys, no portal", sub: plural(keys.length, "profile"),
+    nodes: keyRows.length ? [el("div", { class: "aws-tree-body" }, ...keyRows.map((s) => awsProfileRow(s, hits)))] : [] });
+  const unknownRows = unknown.filter((s) => visible.has(s.name));
+  if (unknown.length) entries.push({ key: "unknown", name: "Not grouped yet", host: "Touch ID profiles: sign in or open one to place them", sub: plural(unknown.length, "profile"),
+    nodes: unknownRows.length ? [el("div", { class: "aws-tree-body" }, ...unknownRows.map((s) => awsProfileRow(s, hits)))] : [] });
+  if (!entries.length) return [];
+  // One org on screen at a time: the rail picks it. Keep the pick while it still exists.
+  if (!entries.some((e) => e.key === awsSelected)) awsSelected = entries[0].key;
+  const cur = entries.find((e) => e.key === awsSelected);
+  const inner = el("div", { class: "aws-rail-inner" }, el("h3", { class: "aws-rail-title", textContent: "Portals" }));
+  let otherTitle = false;
+  for (const e of entries) {
+    if (!otherTitle && !e.key.startsWith("portal:")) { inner.append(el("h3", { class: "aws-rail-title", textContent: "Other" })); otherTitle = true; }
+    const b = el("button", { type: "button", class: "aws-rail-item", "aria-current": String(e.key === awsSelected) },
+      el("span", { class: "aws-rail-line" }, el("span", { class: `aws-dot${e.out ? " out" : ""}${e.key.startsWith("portal:") ? "" : " plain"}`, "aria-hidden": "true" }),
+        el("b", { textContent: e.name }), e.out ? el("span", { class: "tag warn", textContent: "Signed out" }) : null),
+      el("small", { textContent: e.sub }));
+    b.dataset.key = e.key;
+    b.addEventListener("click", () => { awsSelected = e.key; renderAwsPage(); });
+    inner.append(b);
+  }
+  const rail = el("nav", { class: "aws-rail", "aria-label": "AWS portals" }, inner);
+  const head = el("div", { class: "aws-pane-head" }, el("span", { class: `aws-dot${cur.out ? " out" : ""}${cur.p ? "" : " plain"}`, "aria-hidden": "true" }),
+    el("b", { class: "aws-portal-name", textContent: cur.name }),
+    el("span", { class: "aws-portal-host", textContent: cur.p ? `${cur.host} · ${cur.p.region}` : cur.host, title: cur.p?.start_url || "" }));
+  if (cur.p) {
+    const p = cur.p;
+    head.append(el("span", { class: "aws-pane-state small muted", textContent: p.logged_in ? (p.renew_error ? "Can't renew · retrying" : portalUntil(p)) : "" }));
+    if (p.logged_in) {
+      const imp = el("button", { type: "button", class: "btn sm", textContent: "Import roles", "aria-label": `Import all roles from ${p.portal}` });
+      imp.addEventListener("click", () => openSsoImport(p.portal, imp));
+      const so = el("button", { type: "button", class: "btn sm", textContent: "Sign out", "aria-label": `Sign out of AWS portal ${p.portal}` });
+      so.addEventListener("click", () => signOutPortal(p, so));
+      head.append(imp, so);
+    } else {
+      const si = signInButton(p.portal, `Sign in to AWS portal ${p.portal}`);
+      si.classList.add("primary");
+      head.append(si);
+    }
+  }
+  const pane = el("section", { class: "aws-pane", "aria-label": cur.name }, head);
+  if (cur.out) pane.append(el("div", { class: "aws-pane-note" }, el("span", {
+    textContent: `${cur.p.ended && cur.p.ended.at ? `Signed out ${shortClock(cur.p.ended.at)}. ` : ""}Agents can’t use ${cur.count === 1 ? "this profile" : `these ${cur.count} profiles`} until you sign in.` })));
+  if (cur.nodes.length) pane.append(...cur.nodes);
+  else pane.append(el("p", { class: "muted aws-pane-empty", textContent: "No roles match." }));
+  return [rail, pane];
 }
 
 async function signOutPortal(p, action) {
@@ -3117,6 +3415,7 @@ function inspectorTemporaryAccess(s) {
   ];
 }
 function renderInspector() {
+  const options = arguments[0] || {};
   const panel = $("inspector");
   // Keep the existing AWS controls and their event listeners when rebuilding the panel.
   const aws = $("aws-detail");
@@ -3133,7 +3432,7 @@ function renderInspector() {
     el("span", { class: "panel-crumb" }, ...wrapName(slash < 0 ? "" : s.name.slice(0, slash) + " /")),
     ...wrapName(s.name.slice(slash + 1))), close),
     el("p", { class: "muted small", textContent: `${isAws(s.name) ? "AWS profile · updated" : "Updated"} ${relTime(s.updated)}` }));
-  if (isAws(s.name)) { panel.append(aws); renderAwsDetail(s); }
+  if (isAws(s.name)) { panel.append(aws); renderAwsDetail(s, options); }
   else {
     const copy = el("button", { class: "btn primary", textContent: "Copy", onclick: () => copyValue(s.name, copy) });
     const edit = el("button", { class: "btn", textContent: "Edit", "aria-label": `Edit ${s.name}`, onclick: () => openEdit(s) });
@@ -3329,7 +3628,7 @@ function runPalette(i, details = false) {
 
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => show(t.dataset.view)));
 $("filter").addEventListener("input", renderSecrets);
-$("aws-filter").addEventListener("input", renderAwsPage);
+$("aws-filter").addEventListener("input", () => renderAwsPage());
 $("sources-filter").addEventListener("input", renderSources);
 // Arrow keys move between rows' primary buttons (item names and folder toggles).
 $("rows").addEventListener("keydown", (e) => {
@@ -3447,8 +3746,21 @@ async function refreshRuntimeAccess() {
   if ($("detail-dialog").open) await renderDetail();
   if (!$("view-secrets").hidden && !$("rows").contains(document.activeElement)) renderSecrets();
 }
-window.addEventListener("focus", () => { if ($("view-init").hidden) refreshRuntimeAccess(); });
-setInterval(() => { if (!document.hidden && $("view-init").hidden) refreshRuntimeAccess(); }, 60000);
+// ---------- foreground refresh listeners (regression-tested) ----------
+// Metadata polls immediately on focus/visibility return; the slower SSO/YOLO runtime
+// refresh keeps its existing cadence. Both are caught so a failed background read
+// cannot surface as an unhandled rejection.
+window.addEventListener("focus", () => {
+  if ($("view-init").hidden) {
+    handleSecretMetadataFocus();
+    refreshRuntimeAccess().catch(() => {});
+  }
+});
+document.addEventListener("visibilitychange", () => { handleSecretMetadataVisibility(); });
+setInterval(() => {
+  if (!document.hidden && $("view-init").hidden) refreshRuntimeAccess().catch(() => {});
+}, 60000);
+// ---------- audit filter ----------
 $("audit-secret").addEventListener("input", () => { auditSeq++; clearTimeout(auditTimer); auditTimer = setTimeout(applyAuditFilter, 150); });
 for (const r of document.querySelectorAll('input[name="audit-only"]')) r.addEventListener("change", applyAuditFilter);
 $("audit-secret").addEventListener("keydown", (e) => {
@@ -3752,7 +4064,7 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     const name = selectedSecret;
     selectedSecret = null; renderLists(); renderInspector();
-    [...document.querySelectorAll(`#view-${currentView} .leaf.link`)].find((n) => n.getAttribute("aria-label") === `Details for ${name}`)?.focus();
+    [...document.querySelectorAll(`#view-${currentView} .leaf.link`)].find((n) => n.dataset.secret === name || n.getAttribute("aria-label") === `Details for ${name}`)?.focus();
   }
 });
 
@@ -3787,6 +4099,8 @@ async function boot() {
   try {
     const s = await loadStatus();
     if (!s.initialized) {
+      appInitialized = false;
+      stopSecretMetadataPolling();
       show("init");
       return;
     }
@@ -3795,6 +4109,8 @@ async function boot() {
     applySourceKinds();
     renderBlock(); // chip + Status badge on every page, from the first paint
     show("secrets");
+    appInitialized = true;
+    startSecretMetadataPolling();
   } catch { /* toast shown */ }
 }
 

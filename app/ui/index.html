@@ -53,7 +53,7 @@
     <!-- Secrets: one list for everything, AWS profiles included -->
     <section id="view-secrets" hidden>
       <nav id="breadcrumbs" class="breadcrumbs" aria-label="Folder path"></nav>
-      <div class="page-head head-row"><h1 id="folder-title">Secrets</h1><span id="count" class="muted"></span>
+      <div class="page-head head-row"><h1 id="folder-title">Secrets</h1><span id="count" class="muted"></span><span id="metadata-stale" class="muted small" role="status" title="Keeping the last loaded list while Karambit retries" hidden>Showing last update · retrying</span>
         <div class="head-actions">
           <button id="palette-open" class="btn">Find <kbd>⌘K</kbd></button>
           <button id="add-open" class="btn primary">New secret</button>
@@ -121,7 +121,7 @@
       <p id="aws-count" class="hint aws-count"></p>
       <div class="toolbar"><div class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><label for="aws-filter" class="sr-only">Filter aws/</label><input id="aws-filter" type="search" placeholder="Filter aws/" autocomplete="off" spellcheck="false"></div></div>
       <div id="aws-exposure" class="exposure-chips" aria-label="Filter AWS by access"></div>
-      <div class="secrets-body"><div class="folder-list"><div id="aws-warnings"></div><div id="aws-groups"></div><p id="aws-empty" class="empty card" hidden>No AWS profiles match.</p></div></div>
+      <div class="secrets-body"><div class="folder-list"><div id="aws-groups"></div><p id="aws-empty" class="empty card" hidden>No AWS profiles yet.</p></div></div>
     </section>
 
     <section id="view-sources" hidden>
